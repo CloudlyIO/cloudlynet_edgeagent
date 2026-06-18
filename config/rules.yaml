@@ -1,0 +1,31 @@
+rules:
+  - module: FM
+    match: "ACS .*124\\.93\\.160\\.157.*unreachable|connect.*124\\.93\\.160\\.157"
+    event_type: vendor_acs_unreachable
+    severity: major
+    message: "Hardcoded vendor ACS unreachable"
+  - module: TR69
+    match: "RPC Unknown received from ACS"
+    event_type: atc_fault_loop
+    severity: major
+    message: "ACS returned Fault to ATC"
+  - module: FILE_TRANS
+    match: "File upload success, curl code=\\(0\\)"
+    event_type: ftp_upload_ok
+    severity: info
+    message: "FTP upload succeeded"
+  - module: FILE_TRANS
+    match: "curl code=\\(25\\)"
+    event_type: ftp_upload_path_reject
+    severity: minor
+    message: "FTP upload path rejected"
+  - module: FILE_TRANS
+    match: "curl code=\\(67\\)"
+    event_type: ftp_auth_fail
+    severity: major
+    message: "FTP authentication failed"
+  - module: FM
+    match: "(?i)reboot|restart"
+    event_type: device_reboot
+    severity: critical
+    message: "Device reboot detected"

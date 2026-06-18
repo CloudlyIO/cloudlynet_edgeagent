@@ -1,0 +1,13 @@
+enrollment_token: "eyJ2IjoxLCJ0ZW5hbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMzAyOS0wMDAwMDAwMDAwMDEiLCJlZGdlX2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIiwiYmFzZV91cmwiOiJodHRwOi8vY2xvdWRseW5ldC1lZGdlYWdlbnQtdGVzdHN1aXRlOjkwMDAiLCJhcGlfa2V5IjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExLmRldnNlY3JldCJ9"
+poll_interval: 2s
+heartbeat_interval: 5s
+telemetry_t1_interval: 5s
+telemetry_t2_interval: 15s
+telemetry_t3_interval: 30s
+snapshot_interval: 10s
+command_verify_delay: 500ms
+genieacs_nbi_url: "http://cloudlynet-edgeagent-testsuite:7557"
+ftp_watch_dir: "/srv/nybsys-ftp/nybsysftp/uploads"
+rules_file: "/etc/cloudlynet-agent/rules.yaml"
+buffer_db: "/var/lib/cloudlynet-agent/buffer.sqlite"
+buffer_max_bytes: 104857600

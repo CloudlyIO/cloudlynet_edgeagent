@@ -1,0 +1,51 @@
+services:
+  cloudlynet-edgeagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cloudlynet_edgeagent
+    restart: unless-stopped
+    env_file:
+      - ./.env.example
+    environment:
+      CLOUDLYNET_BASE_URL: ${CLOUDLYNET_BASE_URL:-http://cloudlynet-edgeagent-testsuite:9000}
+      GENIEACS_NBI_URL: ${GENIEACS_NBI_URL:-http://cloudlynet-edgeagent-testsuite:7557}
+      FTP_WATCH_DIR: /srv/nybsys-ftp/nybsysftp/uploads
+      BUFFER_DB: /var/lib/cloudlynet-agent/buffer.sqlite
+    volumes:
+      - edgeagent_buffer:/var/lib/cloudlynet-agent
+      - edgeagent_ftp:/srv/nybsys-ftp/nybsysftp/uploads
+    depends_on:
+      cloudlynet-edgeagent-testsuite:
+        condition: service_healthy
+    networks:
+      - cloudlynet-edge
+
+  cloudlynet-edgeagent-testsuite:
+    build:
+      context: ./testsuite
+      dockerfile: Dockerfile
+    container_name: cloudlynet_edgeagent_testsuite
+    restart: unless-stopped
+    environment:
+      FTP_DIR: /ftp
+    ports:
+      - "${EDGEAGENT_TESTSUITE_PORT:-9000}:9000"
+      - "${EDGEAGENT_GENIEACS_PORT:-7557}:7557"
+    volumes:
+      - edgeagent_ftp:/ftp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - cloudlynet-edge
+
+volumes:
+  edgeagent_buffer:
+  edgeagent_ftp:
+
+networks:
+  cloudlynet-edge:
+    driver: bridge
