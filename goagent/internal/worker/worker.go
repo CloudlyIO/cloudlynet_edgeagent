@@ -24,7 +24,8 @@ type Worker struct {
 	col   *collector.Collector
 	// baselined tracks NanoLinks whose ATC-policy baseline SPV has been applied.
 	// Accessed only from the single Run loop goroutine, so no lock is needed.
-	baselined map[string]bool
+	baselined  map[string]bool
+	registered bool
 }
 
 func New(cfg *config.Config, cloudClient *cloud.Client, nbi *genieacs.Client, buf *buffer.Buffer, col *collector.Collector) *Worker {
@@ -87,10 +88,14 @@ func (w *Worker) register(ctx context.Context) {
 		log.Printf("register failed: %v", err)
 		return
 	}
+	w.registered = true
 	log.Printf("registered with cloud: edge_id=%s", w.cfg.Enrollment.EdgeID)
 }
 
 func (w *Worker) heartbeat(ctx context.Context) {
+	if !w.registered {
+		w.register(ctx)
+	}
 	devices, err := w.col.Inventory(ctx)
 	if err != nil {
 		log.Printf("inventory failed: %v", err)

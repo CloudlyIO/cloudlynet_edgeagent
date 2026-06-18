@@ -31,6 +31,7 @@ The prompt used `testsuire`; the implemented directory is the corrected `testsui
 - Decodes the enrollment token from `agent.yaml` or `CLOUDLYNET_ENROLLMENT_TOKEN`.
 - Sends `X-Edge-Key` to the CloudlyNet Agent API.
 - Registers, heartbeats inventory, polls commands, posts telemetry, posts config snapshots, and acks commands.
+- Retries registration on heartbeat until CloudlyNet accepts it, so a late gateway/port-forward does not require restarting the agent container.
 - Emits lifecycle logs (startup, registration, baseline, per-command result) for observability.
 - Uses local SQLite for telemetry outbox retry and applied-command dedupe.
 - Uses GenieACS NBI for inventory, GPV, SPV with `connection_request`, reboot, and the baseline ATC policy fix (applied **once per NanoLink**).
@@ -55,6 +56,24 @@ docker compose down -v
 ```
 
 The testsuite container mocks both CloudlyNet `/v1/agent/**` on port `9000` and GenieACS NBI on port `7557`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, and acked configure/query/reboot commands.
+
+## Live Platform Validation
+
+Use `EDGEAGENT_TESTSUITE_MODE=acsftp` when CloudlyNet/NetAI is already deployed and only local GenieACS + FTP should be mocked. The testsuite health endpoint remains on `9000`, but `/v1/agent/**` is not mocked in this mode.
+
+```bash
+EDGEAGENT_TESTSUITE_MODE=acsftp \
+CLOUDLYNET_ENROLLMENT_TOKEN='<enrollment-token>' \
+docker compose up -d --build cloudlynet-edgeagent-testsuite cloudlynet-edgeagent
+
+curl http://localhost:9000/health
+docker compose logs -f cloudlynet-edgeagent
+```
+
+Production enrollment tokens should embed `https://netai.cloudly.io/`. If you are validating an
+older token that still contains `http://localhost:8080`, temporarily add
+`CLOUDLYNET_BASE_URL='https://netai.cloudly.io/'` to the command above; regenerate the edge key in
+the dashboard after SMO Sim is deployed with the corrected `PUBLIC_BASE_URL`.
 
 ## Root Compose
 

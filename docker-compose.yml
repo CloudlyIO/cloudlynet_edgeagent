@@ -8,10 +8,13 @@ services:
     env_file:
       - ./.env.example
     environment:
+      CLOUDLYNET_ENROLLMENT_TOKEN: ${CLOUDLYNET_ENROLLMENT_TOKEN:-eyJ2IjoxLCJ0ZW5hbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMzAyOS0wMDAwMDAwMDAwMDEiLCJlZGdlX2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIiwiYmFzZV91cmwiOiJodHRwOi8vY2xvdWRseW5ldC1lZGdlYWdlbnQtdGVzdHN1aXRlOjkwMDAiLCJhcGlfa2V5IjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExLmRldnNlY3JldCJ9}
       CLOUDLYNET_BASE_URL: ${CLOUDLYNET_BASE_URL:-http://cloudlynet-edgeagent-testsuite:9000}
       GENIEACS_NBI_URL: ${GENIEACS_NBI_URL:-http://cloudlynet-edgeagent-testsuite:7557}
       FTP_WATCH_DIR: /srv/nybsys-ftp/nybsysftp/uploads
       BUFFER_DB: /var/lib/cloudlynet-agent/buffer.sqlite
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - edgeagent_buffer:/var/lib/cloudlynet-agent
       - edgeagent_ftp:/srv/nybsys-ftp/nybsysftp/uploads
@@ -29,6 +32,7 @@ services:
     restart: unless-stopped
     environment:
       FTP_DIR: /ftp
+      TESTSUITE_MODE: ${EDGEAGENT_TESTSUITE_MODE:-full}
     ports:
       - "${EDGEAGENT_TESTSUITE_PORT:-9000}:9000"
       - "${EDGEAGENT_GENIEACS_PORT:-7557}:7557"

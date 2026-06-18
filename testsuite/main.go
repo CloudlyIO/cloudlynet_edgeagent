@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type state struct {
 }
 
 func main() {
+	mode := strings.ToLower(strings.TrimSpace(env("TESTSUITE_MODE", "full")))
 	st := &state{
 		acks: map[string]string{},
 		params: map[string]any{
@@ -63,6 +65,10 @@ func main() {
 		log.Printf("mock genieacs listening on :7557")
 		log.Fatal(http.ListenAndServe(":7557", genieacsMux(st)))
 	}()
+	if mode == "acsftp" || mode == "acs" {
+		log.Printf("mock acs+ftp health listening on :9000 (platform mock disabled)")
+		log.Fatal(http.ListenAndServe(":9000", acsHealthMux(st, ftpDir, mode)))
+	}
 	log.Printf("mock cloud listening on :9000")
 	log.Fatal(http.ListenAndServe(":9000", cloudMux(st)))
 }
@@ -154,6 +160,27 @@ func cloudMux(st *state) http.Handler {
 		st.acks[id] = body.Status
 		st.mu.Unlock()
 		envelope(w, map[string]any{})
+	})
+	return mux
+}
+
+func acsHealthMux(st *state, ftpDir, mode string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		st.mu.Lock()
+		devices := 0
+		if len(st.params) > 0 {
+			devices = 1
+		}
+		st.mu.Unlock()
+		archives, _ := filepath.Glob(path.Join(ftpDir, "*.tgz"))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":            devices > 0,
+			"mode":          mode,
+			"platform_mock": false,
+			"genieacs":      map[string]any{"listen": ":7557", "devices": devices},
+			"ftp":           map[string]any{"dir": ftpDir, "archives": len(archives)},
+		})
 	})
 	return mux
 }
