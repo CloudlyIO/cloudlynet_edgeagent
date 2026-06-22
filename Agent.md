@@ -4,6 +4,8 @@
 - This submodule owns the Go edge agent only. Platform-side `/v1/agent/**` handlers and database persistence are owned by the CloudlyNet AI platform team and are consumed through `design/openapi.yaml`.
 - The agent is outbound-only in production: no listener is exposed by the agent binary. It talks to CloudlyNet over REST and to local GenieACS/FTP on the edge device.
 - The local `testsuite` is a separate mock microservice for functional testing, not production code. It can run in full mock mode (CloudlyNet + GenieACS + FTP) or `acsftp` mode (only GenieACS + FTP) for live NetAI platform validation.
+- Production edge deployment (Ubuntu 22.04) is **native + systemd**, not Docker. `Makefile` + `scripts/install.sh` bootstrap Go, build from source, and install a `cloudlynet-edgeagent` systemd service. Docker/compose is retained only for local/CI functional testing.
+- The agent's SQLite is an **embedded local file** via `modernc.org/sqlite` (pure Go, `CGO_ENABLED=0`) — not a separate service/container. It only needs a writable data dir (`/var/lib/cloudlynet-agent`); the install toolchain therefore needs no gcc/CGO.
 
 ## Assumptions
 - Enrollment token payload contains `tenant_id`, `edge_id`, `base_url`, and composite `api_key`.
@@ -21,4 +23,5 @@
 ## Impacted Modules
 - `goagent`: production edge-agent binary. `collector/metrics.go` holds the tiered metric/alarm catalogue (the place to correct PM paths).
 - `testsuite`: mock CloudlyNet and GenieACS service for Docker functional tests; `TESTSUITE_MODE=acsftp` disables the CloudlyNet mock for live-platform validation.
+- `Makefile`, `scripts/install.sh`, `scripts/uninstall.sh`, `deploy/`: native Ubuntu 22.04 edge deployment (Go bootstrap, build, systemd service, env-driven config). No platform contract or schema impact.
 - Root compose/docs: optional profile wiring and runbook updates only.

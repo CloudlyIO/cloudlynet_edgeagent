@@ -1,0 +1,25 @@
+[Unit]
+Description=CloudlyNet Edge Agent
+Documentation=https://github.com/cloudlynet/cloudlynet_edgeagent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cloudlynet
+Group=cloudlynet
+EnvironmentFile=/etc/cloudlynet-agent/agent.env
+ExecStart=/usr/local/bin/cloudlynet-agent --config /etc/cloudlynet-agent/agent.yaml
+Restart=always
+RestartSec=5
+
+# Hardening — the agent only needs to write its SQLite buffer under /var/lib.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=cloudlynet-agent
+ReadWritePaths=/var/lib/cloudlynet-agent
+
+[Install]
+WantedBy=multi-user.target

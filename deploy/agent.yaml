@@ -1,0 +1,21 @@
+# CloudlyNet Edge Agent — production config (native/systemd install).
+#
+# Secrets and host-specific endpoints come from the systemd EnvironmentFile at
+# /etc/cloudlynet-agent/agent.env and override the values here:
+#   CLOUDLYNET_ENROLLMENT_TOKEN, CLOUDLYNET_BASE_URL, GENIEACS_NBI_URL,
+#   FTP_WATCH_DIR, BUFFER_DB
+# Keep the token OUT of this file so it is not world-readable.
+
+poll_interval: 10s
+heartbeat_interval: 30s
+telemetry_t1_interval: 30s
+telemetry_t2_interval: 60s
+telemetry_t3_interval: 5m
+snapshot_interval: 5m
+command_verify_delay: 2s
+
+genieacs_nbi_url: "http://127.0.0.1:7557"
+ftp_watch_dir: "/srv/nybsys-ftp/nybsysftp/uploads"
+rules_file: "/etc/cloudlynet-agent/rules.yaml"
+buffer_db: "/var/lib/cloudlynet-agent/buffer.sqlite"
+buffer_max_bytes: 104857600

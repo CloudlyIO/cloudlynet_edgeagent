@@ -5,11 +5,19 @@ CloudlyNet Edge Agent is a Go TR-069 edge process for attaching RadioDevices to 
 ## Layout
 
 ```text
+Makefile
 Dockerfile
 docker-compose.yml
 config/
-  agent.yaml
+  agent.yaml          # docker/test config (embeds a dev token)
   rules.yaml
+deploy/
+  cloudlynet-edgeagent.service  # systemd unit
+  agent.yaml          # production config (no token; env-driven)
+  agent.env.example   # runtime env template (token, endpoints)
+scripts/
+  install.sh          # Ubuntu 22.04 native installer (Go bootstrap + build + systemd)
+  uninstall.sh
 goagent/
   cmd/agent
   internal/config
@@ -46,6 +54,47 @@ The collector reads canonical metric keys per tier from GenieACS and POSTs each 
 - **T3 (5 min, PM + hardware + alarms):** `prb_dl_pct`, `prb_ul_pct`, `sinr_avg_db`, `rrc_conn_mean`, `thp_dl`, `thp_ul`, derived `rrc_success_pct`, plus live `uptime`/`mem_free`/`mem_total`/`cpu_usage`, and `alarms[]` from bounded `Device.FaultMgmt.CurrentAlarm.{i}` rows.
 
 The tier-to-path mapping lives in `goagent/internal/collector/metrics.go`. PM counter paths are pinned to the NanoLink `dmcli.new.conf` dump under `Device.PeriodicStatistics.SampleSet.1.Parameter.{index}.X_8C1F64_CurrentValue`; the index constants are kept in one place so a firmware-specific SampleSet reorder is easy to update.
+
+## Edge Device Install (Ubuntu 22.04, native + systemd)
+
+Production deployment on an edge box runs the agent as a native systemd service —
+no Docker. The agent's SQLite is an embedded local file (`modernc.org/sqlite`,
+pure Go, `CGO_ENABLED=0`), not a separate service, so there is nothing to
+containerize for storage; it only needs a writable data dir.
+
+```bash
+# from the submodule checkout on the edge device
+sudo ./scripts/install.sh
+# set the enrollment token, then start
+sudo sed -i 's#^CLOUDLYNET_ENROLLMENT_TOKEN=.*#CLOUDLYNET_ENROLLMENT_TOKEN=<token>#' /etc/cloudlynet-agent/agent.env
+sudo systemctl start cloudlynet-edgeagent
+journalctl -u cloudlynet-edgeagent -f
+```
+
+`install.sh` is idempotent and, run as root:
+
+1. Ensures Go ≥ 1.23 — uses an existing toolchain or downloads the official
+   tarball to `/usr/local/go` (Ubuntu 22.04's apt Go is too old for `go.mod`).
+2. Builds the binary from source (`CGO_ENABLED=0`).
+3. Creates the `cloudlynet` system user and `/etc/cloudlynet-agent` +
+   `/var/lib/cloudlynet-agent`.
+4. Installs the binary to `/usr/local/bin`, config/rules (without clobbering
+   operator edits — new versions land as `*.default`), and `agent.env` (mode 0600).
+5. Installs/enables the systemd unit. It starts the service only once
+   `CLOUDLYNET_ENROLLMENT_TOKEN` is set, otherwise it enables and prints the
+   start command.
+
+Secrets and host endpoints live in `/etc/cloudlynet-agent/agent.env`
+(`CLOUDLYNET_ENROLLMENT_TOKEN`, optional `CLOUDLYNET_BASE_URL`,
+`GENIEACS_NBI_URL`, `FTP_WATCH_DIR`, `BUFFER_DB`) and override
+`/etc/cloudlynet-agent/agent.yaml`. GenieACS NBI and the FTP log-drop dir are
+assumed to already exist on the box.
+
+Common `make` targets: `build`, `test`, `vet`, `run`, `install`, `uninstall`,
+`docker-build`, `docker-up`, `docker-down`, `docker-logs` (`make help` lists all).
+
+Remove with `sudo ./scripts/uninstall.sh` (add `--purge` to also drop config,
+data, and the user).
 
 ## Local Functional Test
 
