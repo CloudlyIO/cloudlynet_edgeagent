@@ -40,6 +40,7 @@ The prompt used `testsuire`; the implemented directory is the corrected `testsui
 - Sends `X-Edge-Key` to the CloudlyNet Agent API.
 - Registers, heartbeats inventory, polls commands, posts telemetry, posts config snapshots, and acks commands.
 - Reads the complete 24-path NanoLink managed-parameter catalogue for configuration snapshots. Because GenieACS GPV is asynchronous, the snapshot read waits briefly for the requested cache values; an empty response is logged and skipped rather than published as a blank configuration.
+- Treats GenieACS `_id` as an opaque value. A literal percent escape in an ID (for example `%2D`) is escaped again when used as the `config-snapshot` URL path parameter, so SMO receives the same ID that heartbeat and telemetry persist.
 - Treats every device write as a closed-loop operation: after `setParameterValues`, waits `command_verify_delay`, then polls a fresh GPV read until all requested values match or `command_verify_timeout` expires (15s in production). A failed acknowledgement includes the actual read-back, so the dashboard can show the device value that prevented the update.
 - Retries registration on heartbeat until CloudlyNet accepts it, so a late gateway/port-forward does not require restarting the agent container.
 - Emits lifecycle logs (startup, registration, baseline, per-command result) for observability.

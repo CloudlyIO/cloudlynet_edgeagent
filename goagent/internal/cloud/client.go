@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -145,7 +146,11 @@ func (c *Client) SendTelemetryRaw(ctx context.Context, body []byte) error {
 }
 
 func (c *Client) SendSnapshot(ctx context.Context, genieacsID string, req SnapshotRequest) error {
-	return c.do(ctx, http.MethodPost, "/v1/agent/devices/"+genieacsID+"/config-snapshot", req, nil)
+	// GenieACS device IDs may contain literal percent-escaped bytes (for example
+	// "%2D"). They are values, not pre-escaped URL path segments. Escape the
+	// entire value so the HTTP server decodes it once and receives the exact ID
+	// that heartbeat/telemetry persist in nanolink_devices.
+	return c.do(ctx, http.MethodPost, "/v1/agent/devices/"+url.PathEscape(genieacsID)+"/config-snapshot", req, nil)
 }
 
 func (c *Client) Ack(ctx context.Context, commandID string, req AckRequest) error {
