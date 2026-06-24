@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestDecodeEnrollmentToken(t *testing.T) {
@@ -21,5 +22,11 @@ func TestDecodeEnrollmentToken(t *testing.T) {
 	}
 	if got.BaseURL != "http://cloudlynet:8080" || got.APIKey != payload.APIKey {
 		t.Fatalf("unexpected enrollment: %+v", got)
+	}
+}
+
+func TestDefaultConfigHasCommandVerificationWindow(t *testing.T) {
+	if got, want := defaultConfig().CommandVerifyTimeout, 15*time.Second; got != want {
+		t.Fatalf("CommandVerifyTimeout = %s, want %s", got, want)
 	}
 }

@@ -17,15 +17,34 @@ import (
 	"cloudlynet_edgeagent/goagent/internal/rules"
 )
 
+// SnapshotPaths is the complete curated managed-parameter catalogue shown by the
+// NanoLink Config tab. Keep this list aligned with SMO Sim's MANAGED_PARAMS and
+// the frontend managed-params.ts catalogue; status/telemetry paths do not belong
+// in a configuration snapshot.
 var SnapshotPaths = []string{
-	"Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus",
-	"Device.Services.FAPService.1.FAPControl.LTE.OpState",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.PhyCellID",
 	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNDL",
 	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNUL",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.FreqBandIndicator",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.DLBandwidth",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ULBandwidth",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower",
+	"Device.Services.FAPService.1.Capabilities.MaxTxPower",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pa",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pb",
 	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXEnabled",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.OnDurationTimer",
 	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXInactivityTimer",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.LongDRXCycle",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.ShortDRXCycle",
 	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.X_8C1F64_PCH.DefaultPagingCycle",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.QRxLevMinSIB1",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.SIntraSearch",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A2ThresholdRSRP",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A1ThresholdRSRP",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.Hysteresis",
+	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.TimeToTrigger",
+	"Device.ManagementServer.PeriodicInformInterval",
 	genieacs.AutonomousTransferCompletePolicy,
 }
 
@@ -88,7 +107,7 @@ func (c *Collector) CollectTier(ctx context.Context, tier int) ([]cloud.MetricSa
 }
 
 func (c *Collector) Snapshot(ctx context.Context, genieacsID string) (map[string]any, error) {
-	return c.nbi.GetParams(ctx, genieacsID, SnapshotPaths)
+	return c.nbi.GetParamsFresh(ctx, genieacsID, SnapshotPaths, 10*time.Second)
 }
 
 func (c *Collector) QueueEvents(events []cloud.EventItem) {

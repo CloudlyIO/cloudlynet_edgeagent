@@ -13,6 +13,7 @@ telemetry_t2_interval: 60s
 telemetry_t3_interval: 5m
 snapshot_interval: 5m
 command_verify_delay: 2s
+command_verify_timeout: 15s
 
 genieacs_nbi_url: "http://127.0.0.1:7557"
 ftp_watch_dir: "/srv/nybsys-ftp/nybsysftp/uploads"

@@ -81,6 +81,79 @@ func (c *Client) SetParams(ctx context.Context, deviceID string, writes []cloud.
 func (c *Client) GetParams(ctx context.Context, deviceID string, paths []string) (map[string]any, error) {
 	refresh, _ := json.Marshal(map[string]any{"name": "getParameterValues", "parameterNames": paths})
 	_, _ = c.postTask(ctx, deviceID, refresh)
+	return c.readParams(ctx, deviceID, paths)
+}
+
+// GetParamsFresh waits briefly for a connection-requested GPV task to populate
+// the GenieACS cache. Config snapshots need this stronger guarantee: unlike
+// telemetry, an empty response must never be published as a new configuration
+// state. A partial result is returned at the deadline because some firmware
+// versions may not expose every optional managed parameter.
+func (c *Client) GetParamsFresh(ctx context.Context, deviceID string, paths []string, wait time.Duration) (map[string]any, error) {
+	refresh, _ := json.Marshal(map[string]any{"name": "getParameterValues", "parameterNames": paths})
+	if _, err := c.postTask(ctx, deviceID, refresh); err != nil {
+		return nil, err
+	}
+	return c.waitForParams(ctx, deviceID, paths, wait, func(params map[string]any) bool {
+		return len(params) == len(paths)
+	})
+}
+
+// GetParamsMatching refreshes the requested paths and waits until their cached
+// values match the command's expected values. GenieACS accepts a CWMP task
+// before the RadioDevice applies it, so merely finding a cached value can
+// verify the old value and falsely fail a valid command.
+func (c *Client) GetParamsMatching(ctx context.Context, deviceID string, paths []string, expected map[string]any, wait time.Duration) (map[string]any, error) {
+	refresh, _ := json.Marshal(map[string]any{"name": "getParameterValues", "parameterNames": paths})
+	if _, err := c.postTask(ctx, deviceID, refresh); err != nil {
+		return nil, err
+	}
+	return c.waitForParams(ctx, deviceID, paths, wait, func(params map[string]any) bool {
+		for path, want := range expected {
+			got, ok := params[path]
+			if !ok || fmt.Sprint(got) != fmt.Sprint(want) {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+func (c *Client) waitForParams(ctx context.Context, deviceID string, paths []string, wait time.Duration, complete func(map[string]any) bool) (map[string]any, error) {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	best := map[string]any{}
+	for {
+		params, err := c.readParams(ctx, deviceID, paths)
+		if err != nil {
+			return nil, err
+		}
+		// Keep the newest response when coverage is equal. That preserves the
+		// latest device value in a timeout read-back instead of reporting an
+		// earlier stale cache value with the same number of paths.
+		if len(params) >= len(best) {
+			best = params
+		}
+		if complete(params) {
+			return params, nil
+		}
+		if complete(best) {
+			return best, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return best, nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Client) readParams(ctx context.Context, deviceID string, paths []string) (map[string]any, error) {
 	q := url.QueryEscape(fmt.Sprintf(`{"_id":%q}`, deviceID))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/devices/?query="+q, nil)
 	resp, err := c.http.Do(req)

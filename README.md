@@ -39,6 +39,8 @@ The prompt used `testsuire`; the implemented directory is the corrected `testsui
 - Decodes the enrollment token from `agent.yaml` or `CLOUDLYNET_ENROLLMENT_TOKEN`.
 - Sends `X-Edge-Key` to the CloudlyNet Agent API.
 - Registers, heartbeats inventory, polls commands, posts telemetry, posts config snapshots, and acks commands.
+- Reads the complete 24-path NanoLink managed-parameter catalogue for configuration snapshots. Because GenieACS GPV is asynchronous, the snapshot read waits briefly for the requested cache values; an empty response is logged and skipped rather than published as a blank configuration.
+- Treats every device write as a closed-loop operation: after `setParameterValues`, waits `command_verify_delay`, then polls a fresh GPV read until all requested values match or `command_verify_timeout` expires (15s in production). A failed acknowledgement includes the actual read-back, so the dashboard can show the device value that prevented the update.
 - Retries registration on heartbeat until CloudlyNet accepts it, so a late gateway/port-forward does not require restarting the agent container.
 - Emits lifecycle logs (startup, registration, baseline, per-command result) for observability.
 - Uses local SQLite for telemetry outbox retry and applied-command dedupe.
@@ -104,7 +106,7 @@ curl http://localhost:9000/health
 docker compose down -v
 ```
 
-The testsuite container mocks both CloudlyNet `/v1/agent/**` on port `9000` and GenieACS NBI on port `7557`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, and acked configure/query/reboot commands.
+The testsuite container mocks both CloudlyNet `/v1/agent/**` on port `9000` and GenieACS NBI on port `7557`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, acked configure/query/reboot commands, and delivered all 24 managed configuration paths.
 
 ## Live Platform Validation
 

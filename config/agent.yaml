@@ -6,6 +6,7 @@ telemetry_t2_interval: 15s
 telemetry_t3_interval: 30s
 snapshot_interval: 10s
 command_verify_delay: 500ms
+command_verify_timeout: 3s
 genieacs_nbi_url: "http://cloudlynet-edgeagent-testsuite:7557"
 ftp_watch_dir: "/srv/nybsys-ftp/nybsysftp/uploads"
 rules_file: "/etc/cloudlynet-agent/rules.yaml"

@@ -16,21 +16,25 @@ import (
 )
 
 type state struct {
-	mu         sync.Mutex
-	registered int
-	heartbeats int
-	telemetry  int
-	events     int
-	failures   int
-	snapshots  int
-	acks       map[string]string
-	params     map[string]any
+	mu             sync.Mutex
+	registered     int
+	heartbeats     int
+	telemetry      int
+	events         int
+	failures       int
+	snapshots      int
+	snapshotParams map[string]any
+	acks           map[string]string
+	params         map[string]any
 }
+
+const managedSnapshotParamCount = 24
 
 func main() {
 	mode := strings.ToLower(strings.TrimSpace(env("TESTSUITE_MODE", "full")))
 	st := &state{
-		acks: map[string]string{},
+		acks:           map[string]string{},
+		snapshotParams: map[string]any{},
 		params: map[string]any{
 			"_id":                               "NANO-1",
 			"Device.DeviceInfo.SerialNumber":    map[string]any{"_value": "SN-0001"},
@@ -38,15 +42,32 @@ func main() {
 			"Device.DeviceInfo.SoftwareVersion": map[string]any{"_value": "1.0.0"},
 			"Device.LAN.IPAddress":              map[string]any{"_value": "192.168.8.248"},
 			"Device.WAN.IPAddress":              map[string]any{"_value": "10.0.0.10"},
-			"Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus":                              map[string]any{"_value": true},
-			"Device.Services.FAPService.1.FAPControl.LTE.OpState":                                 map[string]any{"_value": true},
-			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower":             map[string]any{"_value": "-10"},
-			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNDL":                         map[string]any{"_value": "1850"},
-			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNUL":                         map[string]any{"_value": "19850"},
-			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXEnabled":                  map[string]any{"_value": "1"},
-			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXInactivityTimer":          map[string]any{"_value": "1920"},
-			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.X_8C1F64_PCH.DefaultPagingCycle": map[string]any{"_value": "rf128"},
-			"Device.X_8C1F64_DebugMgmt.Upload.AutonomousTransferCompletePolicy":                   map[string]any{"_value": "Always"},
+			"Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus":                                    map[string]any{"_value": true},
+			"Device.Services.FAPService.1.FAPControl.LTE.OpState":                                       map[string]any{"_value": true},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower":                   map[string]any{"_value": "-10"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.PhyCellID":                              map[string]any{"_value": "449"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNDL":                               map[string]any{"_value": "1850"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNUL":                               map[string]any{"_value": "19850"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.FreqBandIndicator":                      map[string]any{"_value": "3"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.DLBandwidth":                            map[string]any{"_value": "100"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ULBandwidth":                            map[string]any{"_value": "100"},
+			"Device.Services.FAPService.1.Capabilities.MaxTxPower":                                      map[string]any{"_value": "21"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pa":                              map[string]any{"_value": "0"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pb":                              map[string]any{"_value": "0"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXEnabled":                        map[string]any{"_value": "1"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.OnDurationTimer":                   map[string]any{"_value": "40"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXInactivityTimer":                map[string]any{"_value": "1920"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.LongDRXCycle":                      map[string]any{"_value": "128"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.ShortDRXCycle":                     map[string]any{"_value": "128"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.X_8C1F64_PCH.DefaultPagingCycle":       map[string]any{"_value": "rf128"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.QRxLevMinSIB1": map[string]any{"_value": "-62"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.SIntraSearch":  map[string]any{"_value": "21"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A2ThresholdRSRP":   map[string]any{"_value": "50"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A1ThresholdRSRP":   map[string]any{"_value": "60"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.Hysteresis":        map[string]any{"_value": "2"},
+			"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.TimeToTrigger":     map[string]any{"_value": "40"},
+			"Device.ManagementServer.PeriodicInformInterval":                                            map[string]any{"_value": "300"},
+			"Device.X_8C1F64_DebugMgmt.Upload.AutonomousTransferCompletePolicy":                         map[string]any{"_value": "Always"},
 			"_lastInform": "2026-06-17T00:00:00Z",
 		},
 	}
@@ -78,16 +99,17 @@ func cloudMux(st *state) http.Handler {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		ok := st.registered > 0 && st.heartbeats > 0 && st.telemetry > 0 && st.events > 0 && st.failures > 0 && st.snapshots > 0 && len(st.acks) >= 3
+		ok := st.registered > 0 && st.heartbeats > 0 && st.telemetry > 0 && st.events > 0 && st.failures > 0 && st.snapshots > 0 && len(st.snapshotParams) == managedSnapshotParamCount && len(st.acks) >= 3
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":         ok,
-			"registered": st.registered,
-			"heartbeats": st.heartbeats,
-			"telemetry":  st.telemetry,
-			"events":     st.events,
-			"failures":   st.failures,
-			"snapshots":  st.snapshots,
-			"acks":       st.acks,
+			"ok":              ok,
+			"registered":      st.registered,
+			"heartbeats":      st.heartbeats,
+			"telemetry":       st.telemetry,
+			"events":          st.events,
+			"failures":        st.failures,
+			"snapshots":       st.snapshots,
+			"snapshot_params": len(st.snapshotParams),
+			"acks":            st.acks,
 		})
 	})
 	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, r *http.Request) {
@@ -138,8 +160,15 @@ func cloudMux(st *state) http.Handler {
 	})
 	mux.HandleFunc("/v1/agent/devices/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/config-snapshot") {
+			var body struct {
+				Params map[string]any `json:"params"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			st.mu.Lock()
 			st.snapshots++
+			for path, value := range body.Params {
+				st.snapshotParams[path] = value
+			}
 			st.mu.Unlock()
 			envelope(w, map[string]any{})
 			return

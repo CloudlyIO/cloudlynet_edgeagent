@@ -20,36 +20,38 @@ type Enrollment struct {
 }
 
 type Config struct {
-	EnrollmentToken     string        `yaml:"enrollment_token"`
-	PollInterval        time.Duration `yaml:"poll_interval"`
-	HeartbeatInterval   time.Duration `yaml:"heartbeat_interval"`
-	TelemetryT1Interval time.Duration `yaml:"telemetry_t1_interval"`
-	TelemetryT2Interval time.Duration `yaml:"telemetry_t2_interval"`
-	TelemetryT3Interval time.Duration `yaml:"telemetry_t3_interval"`
-	SnapshotInterval    time.Duration `yaml:"snapshot_interval"`
-	CommandVerifyDelay  time.Duration `yaml:"command_verify_delay"`
-	GenieACSNBIURL      string        `yaml:"genieacs_nbi_url"`
-	FTPWatchDir         string        `yaml:"ftp_watch_dir"`
-	RulesFile           string        `yaml:"rules_file"`
-	BufferDB            string        `yaml:"buffer_db"`
-	BufferMaxBytes      int64         `yaml:"buffer_max_bytes"`
-	Enrollment          Enrollment    `yaml:"-"`
+	EnrollmentToken      string        `yaml:"enrollment_token"`
+	PollInterval         time.Duration `yaml:"poll_interval"`
+	HeartbeatInterval    time.Duration `yaml:"heartbeat_interval"`
+	TelemetryT1Interval  time.Duration `yaml:"telemetry_t1_interval"`
+	TelemetryT2Interval  time.Duration `yaml:"telemetry_t2_interval"`
+	TelemetryT3Interval  time.Duration `yaml:"telemetry_t3_interval"`
+	SnapshotInterval     time.Duration `yaml:"snapshot_interval"`
+	CommandVerifyDelay   time.Duration `yaml:"command_verify_delay"`
+	CommandVerifyTimeout time.Duration `yaml:"command_verify_timeout"`
+	GenieACSNBIURL       string        `yaml:"genieacs_nbi_url"`
+	FTPWatchDir          string        `yaml:"ftp_watch_dir"`
+	RulesFile            string        `yaml:"rules_file"`
+	BufferDB             string        `yaml:"buffer_db"`
+	BufferMaxBytes       int64         `yaml:"buffer_max_bytes"`
+	Enrollment           Enrollment    `yaml:"-"`
 }
 
 type rawConfig struct {
-	EnrollmentToken     string `yaml:"enrollment_token"`
-	PollInterval        string `yaml:"poll_interval"`
-	HeartbeatInterval   string `yaml:"heartbeat_interval"`
-	TelemetryT1Interval string `yaml:"telemetry_t1_interval"`
-	TelemetryT2Interval string `yaml:"telemetry_t2_interval"`
-	TelemetryT3Interval string `yaml:"telemetry_t3_interval"`
-	SnapshotInterval    string `yaml:"snapshot_interval"`
-	CommandVerifyDelay  string `yaml:"command_verify_delay"`
-	GenieACSNBIURL      string `yaml:"genieacs_nbi_url"`
-	FTPWatchDir         string `yaml:"ftp_watch_dir"`
-	RulesFile           string `yaml:"rules_file"`
-	BufferDB            string `yaml:"buffer_db"`
-	BufferMaxBytes      int64  `yaml:"buffer_max_bytes"`
+	EnrollmentToken      string `yaml:"enrollment_token"`
+	PollInterval         string `yaml:"poll_interval"`
+	HeartbeatInterval    string `yaml:"heartbeat_interval"`
+	TelemetryT1Interval  string `yaml:"telemetry_t1_interval"`
+	TelemetryT2Interval  string `yaml:"telemetry_t2_interval"`
+	TelemetryT3Interval  string `yaml:"telemetry_t3_interval"`
+	SnapshotInterval     string `yaml:"snapshot_interval"`
+	CommandVerifyDelay   string `yaml:"command_verify_delay"`
+	CommandVerifyTimeout string `yaml:"command_verify_timeout"`
+	GenieACSNBIURL       string `yaml:"genieacs_nbi_url"`
+	FTPWatchDir          string `yaml:"ftp_watch_dir"`
+	RulesFile            string `yaml:"rules_file"`
+	BufferDB             string `yaml:"buffer_db"`
+	BufferMaxBytes       int64  `yaml:"buffer_max_bytes"`
 }
 
 func Load(path string) (*Config, error) {
@@ -74,18 +76,19 @@ func Load(path string) (*Config, error) {
 
 func defaultConfig() *Config {
 	return &Config{
-		PollInterval:        10 * time.Second,
-		HeartbeatInterval:   30 * time.Second,
-		TelemetryT1Interval: 30 * time.Second,
-		TelemetryT2Interval: time.Minute,
-		TelemetryT3Interval: 5 * time.Minute,
-		SnapshotInterval:    5 * time.Minute,
-		CommandVerifyDelay:  2 * time.Second,
-		GenieACSNBIURL:      "http://127.0.0.1:7557",
-		FTPWatchDir:         "/srv/nybsys-ftp/nybsysftp/uploads",
-		RulesFile:           "/etc/cloudlynet-agent/rules.yaml",
-		BufferDB:            "/var/lib/cloudlynet-agent/buffer.sqlite",
-		BufferMaxBytes:      104857600,
+		PollInterval:         10 * time.Second,
+		HeartbeatInterval:    30 * time.Second,
+		TelemetryT1Interval:  30 * time.Second,
+		TelemetryT2Interval:  time.Minute,
+		TelemetryT3Interval:  5 * time.Minute,
+		SnapshotInterval:     5 * time.Minute,
+		CommandVerifyDelay:   2 * time.Second,
+		CommandVerifyTimeout: 15 * time.Second,
+		GenieACSNBIURL:       "http://127.0.0.1:7557",
+		FTPWatchDir:          "/srv/nybsys-ftp/nybsysftp/uploads",
+		RulesFile:            "/etc/cloudlynet-agent/rules.yaml",
+		BufferDB:             "/var/lib/cloudlynet-agent/buffer.sqlite",
+		BufferMaxBytes:       104857600,
 	}
 }
 
@@ -123,6 +126,7 @@ func applyRaw(cfg *Config, raw rawConfig) {
 	setDuration(raw.TelemetryT3Interval, &cfg.TelemetryT3Interval)
 	setDuration(raw.SnapshotInterval, &cfg.SnapshotInterval)
 	setDuration(raw.CommandVerifyDelay, &cfg.CommandVerifyDelay)
+	setDuration(raw.CommandVerifyTimeout, &cfg.CommandVerifyTimeout)
 }
 
 func applyEnv(cfg *Config) {

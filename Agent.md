@@ -13,6 +13,8 @@
 - RadioDevice interaction is TR-069-compatible through GenieACS NBI.
 - `design/openapi.yaml` and `design/schemas.sql` already contain the frozen Agent API and NybSys/edge schema; no API/schema behavior change is required in this submodule. `MetricSample.metrics` is open (`additionalProperties`), so the tiered metric keys below are forward-compatible with the existing contract.
 - Tiered telemetry keys follow handover §3.4. PM counter paths (`prb_dl_pct`, `sinr_avg_db`, `rrc_success_pct`, etc.) are pinned to the NanoLink `dmcli.new.conf` SampleSet mapping in `collector/metrics.go` (`Device.PeriodicStatistics.SampleSet.1.Parameter.{index}.X_8C1F64_CurrentValue`). T1/T2 live paths and live-hardware T3 paths are concrete.
+- Config snapshots are separate from telemetry and must cover the same 24 managed paths as SMO Sim `MANAGED_PARAMS` and frontend `managed-params.ts`. The agent waits up to 10 seconds for the connection-requested GPV cache refresh and skips empty maps; platform-side storage merges non-empty partial reads and command read-backs rather than treating either as a destructive replacement.
+- Southbound config verification is value-aware, not cache-presence-aware: `GetParamsMatching` polls a fresh GPV cache read until all expected writes match or `command_verify_timeout` expires (15s production). Failure evidence keeps the device's `actual` read-back alongside the requested `expected` value.
 
 ## Telemetry & Collection
 - T1 (live liveness/UE counts), T2 (RF/coverage), T3 (PM + hardware + bounded `Device.FaultMgmt.CurrentAlarm.{i}` alarms). Each tier is read via one GenieACS GPV batch and POSTed at its cadence; devices with no readable metric are skipped.

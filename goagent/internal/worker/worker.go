@@ -159,6 +159,12 @@ func (w *Worker) pushSnapshots(ctx context.Context) {
 			log.Printf("snapshot failed for %s: %v", d.GenieACSID, err)
 			continue
 		}
+		if len(params) == 0 {
+			// A GPV task can be accepted before GenieACS has refreshed its cache.
+			// Do not let an empty response replace the last usable cloud snapshot.
+			log.Printf("snapshot skipped for %s: GenieACS returned no managed parameters", d.GenieACSID)
+			continue
+		}
 		if err := w.cloud.SendSnapshot(ctx, d.GenieACSID, cloud.SnapshotRequest{Params: params, Source: "agent"}); err != nil {
 			log.Printf("snapshot post failed for %s: %v", d.GenieACSID, err)
 		}
@@ -206,16 +212,20 @@ func (w *Worker) apply(ctx context.Context, cmd cloud.Command) cloud.AckRequest 
 		case <-time.After(w.cfg.CommandVerifyDelay):
 		}
 		paths := writePaths(cmd.Payload.Writes)
-		readback, err := w.nbi.GetParams(ctx, cmd.GenieACSID, paths)
+		expected := expectedValues(cmd.Payload)
+		readback, err := w.nbi.GetParamsMatching(ctx, cmd.GenieACSID, paths, expected, w.cfg.CommandVerifyTimeout)
 		if err != nil {
 			return failed(err)
 		}
-		mismatch := verify(cmd.Payload, readback)
+		mismatch := verifyExpected(expected, readback)
 		status := "applied"
+		detail := ""
 		if len(mismatch) > 0 {
 			status = "failed"
+			detail = fmt.Sprintf("device read-back did not match the requested value within %s", w.cfg.CommandVerifyTimeout)
+			log.Printf("command %s verification mismatch: %+v", cmd.ID, mismatch)
 		}
-		return cloud.AckRequest{Status: status, Result: cloud.AckResult{Readback: readback, Mismatch: mismatch, TaskID: taskID}}
+		return cloud.AckRequest{Status: status, Result: cloud.AckResult{Readback: readback, Mismatch: mismatch, TaskID: taskID, Detail: detail}}
 	case "query":
 		// Let the GPV refresh task land before reading back (same settle budget as configure).
 		select {
@@ -261,13 +271,22 @@ func writePaths(writes []cloud.Write) []string {
 }
 
 func verify(payload cloud.CommandPayload, readback map[string]any) []map[string]any {
+	return verifyExpected(expectedValues(payload), readback)
+}
+
+func expectedValues(payload cloud.CommandPayload) map[string]any {
 	expected := payload.Verify
-	if len(expected) == 0 {
-		expected = map[string]any{}
-		for _, w := range payload.Writes {
-			expected[w.Path] = w.Value
-		}
+	if len(expected) > 0 {
+		return expected
 	}
+	expected = map[string]any{}
+	for _, w := range payload.Writes {
+		expected[w.Path] = w.Value
+	}
+	return expected
+}
+
+func verifyExpected(expected map[string]any, readback map[string]any) []map[string]any {
 	var mismatch []map[string]any
 	for path, want := range expected {
 		got, ok := readback[path]
