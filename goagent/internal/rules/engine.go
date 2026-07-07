@@ -92,14 +92,14 @@ func event(device, ts, module, eventType, severity, message, raw string) cloud.E
 		device = "unknown"
 	}
 	return cloud.EventItem{
-		GenieACSID: device,
-		Timestamp:  ts,
-		Module:     module,
-		EventType:  eventType,
-		Severity:   severity,
-		Message:    message,
-		Attrs:      map[string]any{"raw": raw},
-		DedupKey:   dedup(device, ts, eventType, raw),
+		CWMPID:    device,
+		Timestamp: ts,
+		Module:    module,
+		EventType: eventType,
+		Severity:  severity,
+		Message:   message,
+		Attrs:     map[string]any{"raw": raw},
+		DedupKey:  dedup(device, ts, eventType, raw),
 	}
 }
 

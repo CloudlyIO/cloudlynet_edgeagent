@@ -8,7 +8,7 @@ import (
 )
 
 // Tiered telemetry metric catalogue — handover §3.4 (FINALISED 2026-06-10 against the live
-// NanoLink dump). Each tier is read from GenieACS at its own cadence and POSTed with its
+// NanoLink dump). Each tier is read from the former ACS at its own cadence and POSTed with its
 // canonical metric key. The cloud's MetricSample.metrics is open (additionalProperties), so
 // keys not present on a given device are simply omitted.
 //
@@ -90,7 +90,7 @@ func pmValuePath(parameterIndex int) string {
 	return fmt.Sprintf("%sParameter.%d.X_8C1F64_CurrentValue", sampleSet, parameterIndex)
 }
 
-// tierReadPaths returns the GenieACS paths to GPV for a tier (includes derived-counter inputs).
+// tierReadPaths returns the TR-069 paths to GPV for a tier (includes derived-counter inputs).
 func tierReadPaths(tier int) []string {
 	defs := tierDefs(tier)
 	paths := make([]string, 0, len(defs)+2)
@@ -140,7 +140,7 @@ func alarmReadPaths() []string {
 }
 
 // buildAlarms folds a raw GPV result over the FaultMgmt.CurrentAlarm table into alarm items.
-func buildAlarms(genieacsID, ts string, raw map[string]any) []cloud.AlarmItem {
+func buildAlarms(cwmpID, ts string, raw map[string]any) []cloud.AlarmItem {
 	var out []cloud.AlarmItem
 	limit := maxAlarmRows
 	if count, ok := toFloat(raw["Device.FaultMgmt.CurrentAlarmNumberOfEntries"]); ok && count >= 0 && int(count) < limit {
@@ -153,11 +153,11 @@ func buildAlarms(genieacsID, ts string, raw map[string]any) []cloud.AlarmItem {
 			continue
 		}
 		item := cloud.AlarmItem{
-			GenieACSID: genieacsID,
-			Timestamp:  alarmTime(raw[base+"EventTime"], ts),
-			Severity:   normalizeSeverity(raw[base+"PerceivedSeverity"]),
-			AlarmType:  fmt.Sprint(etype),
-			Active:     true,
+			CWMPID:    cwmpID,
+			Timestamp: alarmTime(raw[base+"EventTime"], ts),
+			Severity:  normalizeSeverity(raw[base+"PerceivedSeverity"]),
+			AlarmType: fmt.Sprint(etype),
+			Active:    true,
 		}
 		if msg, ok := raw[base+"SpecificProblem"]; ok {
 			item.Message = fmt.Sprint(msg)

@@ -27,7 +27,7 @@ func New(baseURL, apiKey string) *Client {
 }
 
 type InventoryItem struct {
-	GenieACSID   string `json:"genieacs_id"`
+	CWMPID       string `json:"cwmp_id"`
 	SerialNumber string `json:"serial_number,omitempty"`
 	ProductClass string `json:"product_class,omitempty"`
 	AdminLANIP   string `json:"admin_lan_ip,omitempty"`
@@ -48,30 +48,30 @@ type HeartbeatRequest struct {
 }
 
 type MetricSample struct {
-	GenieACSID string         `json:"genieacs_id"`
-	Timestamp  string         `json:"ts"`
-	Tier       int            `json:"tier"`
-	Metrics    map[string]any `json:"metrics"`
+	CWMPID    string         `json:"cwmp_id"`
+	Timestamp string         `json:"ts"`
+	Tier      int            `json:"tier"`
+	Metrics   map[string]any `json:"metrics"`
 }
 
 type EventItem struct {
-	GenieACSID string         `json:"genieacs_id"`
-	Timestamp  string         `json:"ts"`
-	Module     string         `json:"module"`
-	EventType  string         `json:"event_type"`
-	Severity   string         `json:"severity"`
-	Message    string         `json:"message,omitempty"`
-	Attrs      map[string]any `json:"attrs,omitempty"`
-	DedupKey   string         `json:"dedup_key,omitempty"`
+	CWMPID    string         `json:"cwmp_id"`
+	Timestamp string         `json:"ts"`
+	Module    string         `json:"module"`
+	EventType string         `json:"event_type"`
+	Severity  string         `json:"severity"`
+	Message   string         `json:"message,omitempty"`
+	Attrs     map[string]any `json:"attrs,omitempty"`
+	DedupKey  string         `json:"dedup_key,omitempty"`
 }
 
 type AlarmItem struct {
-	GenieACSID string `json:"genieacs_id"`
-	Timestamp  string `json:"ts"`
-	Severity   string `json:"severity"`
-	AlarmType  string `json:"alarm_type,omitempty"`
-	Message    string `json:"message,omitempty"`
-	Active     bool   `json:"active"`
+	CWMPID    string `json:"cwmp_id"`
+	Timestamp string `json:"ts"`
+	Severity  string `json:"severity"`
+	AlarmType string `json:"alarm_type,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Active    bool   `json:"active"`
 }
 
 type TelemetryRequest struct {
@@ -99,11 +99,11 @@ type CommandPayload struct {
 }
 
 type Command struct {
-	ID         string         `json:"id"`
-	DeviceID   string         `json:"device_id"`
-	GenieACSID string         `json:"genieacs_id"`
-	Type       string         `json:"type"`
-	Payload    CommandPayload `json:"payload"`
+	ID       string         `json:"id"`
+	DeviceID string         `json:"device_id"`
+	CWMPID   string         `json:"cwmp_id"`
+	Type     string         `json:"type"`
+	Payload  CommandPayload `json:"payload"`
 }
 
 type PollData struct {
@@ -145,16 +145,16 @@ func (c *Client) SendTelemetryRaw(ctx context.Context, body []byte) error {
 	return c.doRaw(ctx, http.MethodPost, "/v1/agent/telemetry", body, nil)
 }
 
-func (c *Client) SendSnapshot(ctx context.Context, genieacsID string, req SnapshotRequest) error {
-	// GenieACS device IDs may contain literal percent-escaped bytes (for example
+func (c *Client) SendSnapshot(ctx context.Context, cwmpID string, req SnapshotRequest) error {
+	// the former ACS device IDs may contain literal percent-escaped bytes (for example
 	// "%2D"). They are values, not pre-escaped URL path segments. Escape the
 	// entire value so the HTTP server decodes it once and receives the exact ID
 	// that heartbeat/telemetry persist in nanolink_devices.
-	return c.do(ctx, http.MethodPost, "/v1/agent/devices/"+url.PathEscape(genieacsID)+"/config-snapshot", req, nil)
+	return c.do(ctx, http.MethodPost, "/v1/agent/devices/"+url.PathEscape(cwmpID)+"/config-snapshot", req, nil)
 }
 
 func (c *Client) Ack(ctx context.Context, commandID string, req AckRequest) error {
-	return c.do(ctx, http.MethodPost, "/v1/agent/commands/"+commandID+"/ack", req, nil)
+	return c.do(ctx, http.MethodPost, "/v1/agent/commands/"+url.PathEscape(commandID)+"/ack", req, nil)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {

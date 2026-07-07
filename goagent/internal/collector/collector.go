@@ -13,9 +13,30 @@ import (
 	"time"
 
 	"cloudlynet_edgeagent/goagent/internal/cloud"
-	"cloudlynet_edgeagent/goagent/internal/genieacs"
+	"cloudlynet_edgeagent/goagent/internal/cwmp"
 	"cloudlynet_edgeagent/goagent/internal/rules"
 )
+
+// autonomousTransferCompletePolicy is the managed path formerly exported by the
+// (removed) NBI client package. It stays in the snapshot catalogue as a readable
+// managed parameter; the agent no longer writes it (the ATC handler obsoletes
+// the old policy=None stopgap).
+const autonomousTransferCompletePolicy = "Device.X_8C1F64_DebugMgmt.Upload.AutonomousTransferCompletePolicy"
+
+// Inventory liveness/identity paths read from the CWMP parameter cache to
+// enrich the device inventory (replaces the old the former ACS document dig).
+const (
+	pathRFTxStatus = "Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus"
+	pathOpState    = "Device.Services.FAPService.1.FAPControl.LTE.OpState"
+	pathLANIP      = "Device.LAN.IPAddress"
+	pathWANIP      = "Device.WAN.IPAddress"
+)
+
+var inventoryStatusPaths = []string{pathRFTxStatus, pathOpState, pathLANIP, pathWANIP}
+
+// snapshotAwait bounds how long a config snapshot waits for a fresh device read
+// before falling back to the last cached values.
+const snapshotAwait = 10 * time.Second
 
 // SnapshotPaths is the complete curated managed-parameter catalogue shown by the
 // NanoLink Config tab. Keep this list aligned with SMO Sim's MANAGED_PARAMS and
@@ -45,11 +66,13 @@ var SnapshotPaths = []string{
 	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.Hysteresis",
 	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.TimeToTrigger",
 	"Device.ManagementServer.PeriodicInformInterval",
-	genieacs.AutonomousTransferCompletePolicy,
+	autonomousTransferCompletePolicy,
 }
 
+// Collector reads device state from the in-agent CWMP ACS (params cached from
+// Informs + GPV responses) and parses NanoLink FTP log archives into events.
 type Collector struct {
-	nbi     *genieacs.Client
+	acs     *cwmp.Server
 	rules   *rules.Engine
 	ftpDir  string
 	mu      sync.Mutex
@@ -57,16 +80,44 @@ type Collector struct {
 	seenTGZ map[string]struct{}
 }
 
-func New(nbi *genieacs.Client, ruleEngine *rules.Engine, ftpDir string) *Collector {
-	return &Collector{nbi: nbi, rules: ruleEngine, ftpDir: ftpDir, seenTGZ: map[string]struct{}{}}
+func New(acs *cwmp.Server, ruleEngine *rules.Engine, ftpDir string) *Collector {
+	return &Collector{acs: acs, rules: ruleEngine, ftpDir: ftpDir, seenTGZ: map[string]struct{}{}}
 }
 
+// Inventory builds the device inventory from the CWMP store, enriching liveness
+// and IP fields from the parameter cache.
 func (c *Collector) Inventory(ctx context.Context) ([]cloud.InventoryItem, error) {
-	return c.nbi.Inventory(ctx)
+	records := c.acs.Store().ListDevices()
+	out := make([]cloud.InventoryItem, 0, len(records))
+	for _, d := range records {
+		item := cloud.InventoryItem{
+			CWMPID:       d.DeviceID,
+			SerialNumber: d.SerialNumber,
+			ProductClass: d.ProductClass,
+			SWVersion:    d.SWVersion,
+		}
+		if !d.LastInformAt.IsZero() {
+			item.LastInformAt = d.LastInformAt.Format(time.RFC3339)
+		}
+		st := c.acs.Store().GetParams(d.DeviceID, inventoryStatusPaths)
+		item.AdminLANIP = st[pathLANIP]
+		item.WANIP = st[pathWANIP]
+		if v, ok := st[pathRFTxStatus]; ok {
+			b := truthy(v)
+			item.RFTxStatus = &b
+		}
+		if v, ok := st[pathOpState]; ok {
+			b := truthy(v)
+			item.OpState = &b
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 // CollectTier reads a tier's canonical metric keys (and, for T3, FaultMgmt alarms) for every
-// NanoLink. Devices with no readable metric for the tier are skipped so empty samples are not
+// NanoLink from the cached parameter store, and queues a fresh GPV read so the cache is current
+// next cycle. Devices with no readable metric for the tier are skipped so empty samples are not
 // pushed. Alarms are only collected for T3.
 func (c *Collector) CollectTier(ctx context.Context, tier int) ([]cloud.MetricSample, []cloud.AlarmItem, error) {
 	devices, err := c.Inventory(ctx)
@@ -81,13 +132,11 @@ func (c *Collector) CollectTier(ctx context.Context, tier int) ([]cloud.MetricSa
 	samples := make([]cloud.MetricSample, 0, len(devices))
 	var alarms []cloud.AlarmItem
 	for _, d := range devices {
-		raw, err := c.nbi.GetParams(ctx, d.GenieACSID, readPaths)
-		if err != nil {
-			log.Printf("collect tier %d gpv failed for %s: %v", tier, d.GenieACSID, err)
-			continue
-		}
+		raw := ToAnyMap(c.acs.Store().GetParams(d.CWMPID, readPaths))
+		// Queue a fresh device read for the next collection cycle.
+		c.acs.Refresh(d.CWMPID, readPaths)
 		metrics := buildMetrics(tier, raw)
-		// Fall back to inventory-derived liveness for T1 when GPV omits them.
+		// Fall back to inventory-derived liveness for T1 when the cache omits them.
 		if tier == 1 {
 			if _, ok := metrics["rf_tx_status"]; !ok && d.RFTxStatus != nil {
 				metrics["rf_tx_status"] = *d.RFTxStatus
@@ -97,17 +146,28 @@ func (c *Collector) CollectTier(ctx context.Context, tier int) ([]cloud.MetricSa
 			}
 		}
 		if len(metrics) > 0 {
-			samples = append(samples, cloud.MetricSample{GenieACSID: d.GenieACSID, Timestamp: now, Tier: tier, Metrics: metrics})
+			samples = append(samples, cloud.MetricSample{CWMPID: d.CWMPID, Timestamp: now, Tier: tier, Metrics: metrics})
 		}
 		if tier == 3 {
-			alarms = append(alarms, buildAlarms(d.GenieACSID, now, raw)...)
+			alarms = append(alarms, buildAlarms(d.CWMPID, now, raw)...)
 		}
 	}
 	return samples, alarms, nil
 }
 
-func (c *Collector) Snapshot(ctx context.Context, genieacsID string) (map[string]any, error) {
-	return c.nbi.GetParamsFresh(ctx, genieacsID, SnapshotPaths, 10*time.Second)
+// Snapshot reads the managed configuration catalogue for a device, preferring a
+// fresh device read and falling back to the last cached values. The worker skips
+// publishing an all-empty result.
+func (c *Collector) Snapshot(ctx context.Context, cwmpID string) (map[string]any, error) {
+	ip := c.acs.Store().DeviceIP(cwmpID)
+	if ip == "" {
+		return map[string]any{}, nil
+	}
+	res, ok := c.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskGPV, Paths: SnapshotPaths, CommandID: "snapshot:" + cwmpID}, snapshotAwait)
+	if ok && len(res.Params) > 0 {
+		return ToAnyMap(res.Params), nil
+	}
+	return ToAnyMap(c.acs.Store().GetParams(cwmpID, SnapshotPaths)), nil
 }
 
 func (c *Collector) QueueEvents(events []cloud.EventItem) {
@@ -225,4 +285,19 @@ func deviceFromName(path string) string {
 		return base[:i]
 	}
 	return base
+}
+
+// ToAnyMap widens a CWMP string param map to the map[string]any the cloud DTOs
+// and metric builders use. Exported so the worker reuses it for command read-backs.
+func ToAnyMap(m map[string]string) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// truthy interprets a cached TR-069 string value as a boolean liveness flag.
+func truthy(v string) bool {
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "up")
 }

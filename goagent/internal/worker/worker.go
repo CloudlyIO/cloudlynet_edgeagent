@@ -2,39 +2,42 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"cloudlynet_edgeagent/goagent/internal/buffer"
 	"cloudlynet_edgeagent/goagent/internal/cloud"
 	"cloudlynet_edgeagent/goagent/internal/collector"
 	"cloudlynet_edgeagent/goagent/internal/config"
-	"cloudlynet_edgeagent/goagent/internal/genieacs"
+	"cloudlynet_edgeagent/goagent/internal/cwmp"
 )
 
 const AgentVersion = "0.1.0"
 
 type Worker struct {
-	cfg   *config.Config
-	cloud *cloud.Client
-	nbi   *genieacs.Client
-	buf   *buffer.Buffer
-	col   *collector.Collector
-	// baselined tracks NanoLinks whose ATC-policy baseline SPV has been applied.
-	// Accessed only from the single Run loop goroutine, so no lock is needed.
-	baselined  map[string]bool
+	cfg      *config.Config
+	cloud    *cloud.Client
+	acs      *cwmp.Server
+	manifest *cwmp.Manifest
+	buf      *buffer.Buffer
+	col      *collector.Collector
+
 	registered bool
 }
 
-func New(cfg *config.Config, cloudClient *cloud.Client, nbi *genieacs.Client, buf *buffer.Buffer, col *collector.Collector) *Worker {
-	return &Worker{cfg: cfg, cloud: cloudClient, nbi: nbi, buf: buf, col: col, baselined: map[string]bool{}}
+func New(cfg *config.Config, cloudClient *cloud.Client, acs *cwmp.Server, manifest *cwmp.Manifest, buf *buffer.Buffer, col *collector.Collector) *Worker {
+	return &Worker{cfg: cfg, cloud: cloudClient, acs: acs, manifest: manifest, buf: buf, col: col}
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	log.Printf("cloudlynet edge agent %s starting: edge_id=%s base_url=%s genieacs=%s poll=%s",
-		AgentVersion, w.cfg.Enrollment.EdgeID, w.cfg.Enrollment.BaseURL, w.cfg.GenieACSNBIURL, w.cfg.PollInterval)
+	log.Printf("cloudlynet edge agent %s starting: edge_id=%s base_url=%s cwmp_listen=%s poll=%s",
+		AgentVersion, w.cfg.Enrollment.EdgeID, w.cfg.Enrollment.BaseURL, w.cfg.CWMP.Listen, w.cfg.PollInterval)
 	go w.col.WatchFTP(ctx)
 	w.register(ctx)
 	w.heartbeat(ctx)
@@ -79,7 +82,7 @@ func (w *Worker) register(ctx context.Context) {
 	meta := map[string]any{
 		"edge_id":       w.cfg.Enrollment.EdgeID,
 		"tenant_id":     w.cfg.Enrollment.TenantID,
-		"genieacs_url":  w.cfg.GenieACSNBIURL,
+		"cwmp_listen":   w.cfg.CWMP.Listen,
 		"ftp_watch_dir": w.cfg.FTPWatchDir,
 		"buffer_db":     w.cfg.BufferDB,
 		"agent_runtime": "docker-or-systemd",
@@ -101,17 +104,6 @@ func (w *Worker) heartbeat(ctx context.Context) {
 		log.Printf("inventory failed: %v", err)
 		return
 	}
-	for _, d := range devices {
-		if w.baselined[d.GenieACSID] {
-			continue
-		}
-		if err := w.nbi.EnsureBaseline(ctx, d.GenieACSID); err != nil {
-			log.Printf("baseline ensure failed for %s: %v", d.GenieACSID, err)
-			continue
-		}
-		w.baselined[d.GenieACSID] = true
-		log.Printf("baseline ATC policy ensured for %s", d.GenieACSID)
-	}
 	if err := w.cloud.Heartbeat(ctx, cloud.HeartbeatRequest{Devices: devices}); err != nil {
 		log.Printf("heartbeat failed: %v", err)
 	}
@@ -123,7 +115,9 @@ func (w *Worker) pushTier(ctx context.Context, tier int) {
 		log.Printf("collect tier %d failed: %v", tier, err)
 		return
 	}
-	req := cloud.TelemetryRequest{Metrics: metrics, Events: w.col.DrainEvents(), Alarms: alarms}
+	// FTP-log events + CWMP events (incl. ATC) share the telemetry batch.
+	events := append(w.col.DrainEvents(), w.drainCWMPEvents()...)
+	req := cloud.TelemetryRequest{Metrics: metrics, Events: events, Alarms: alarms}
 	if len(req.Metrics) == 0 && len(req.Events) == 0 && len(req.Alarms) == 0 {
 		return
 	}
@@ -133,6 +127,29 @@ func (w *Worker) pushTier(ctx context.Context, tier int) {
 		return
 	}
 	w.flushOutbox(ctx)
+}
+
+// drainCWMPEvents pulls buffered CWMP events (e.g. autonomous_transfer_complete)
+// out of the store and maps them to the northbound event DTO.
+func (w *Worker) drainCWMPEvents() []cloud.EventItem {
+	stored := w.acs.Store().DrainEvents()
+	if len(stored) == 0 {
+		return nil
+	}
+	out := make([]cloud.EventItem, 0, len(stored))
+	for _, e := range stored {
+		ts := e.TS.Format(time.RFC3339)
+		out = append(out, cloud.EventItem{
+			CWMPID:    e.DeviceID,
+			Timestamp: ts,
+			Module:    e.Module,
+			EventType: e.EventType,
+			Severity:  e.Severity,
+			Message:   e.Message,
+			DedupKey:  eventDedupKey(e.DeviceID, e.EventType, e.Message, ts),
+		})
+	}
+	return out
 }
 
 func (w *Worker) flushOutbox(ctx context.Context) {
@@ -154,19 +171,19 @@ func (w *Worker) pushSnapshots(ctx context.Context) {
 		return
 	}
 	for _, d := range devices {
-		params, err := w.col.Snapshot(ctx, d.GenieACSID)
+		params, err := w.col.Snapshot(ctx, d.CWMPID)
 		if err != nil {
-			log.Printf("snapshot failed for %s: %v", d.GenieACSID, err)
+			log.Printf("snapshot failed for %s: %v", d.CWMPID, err)
 			continue
 		}
 		if len(params) == 0 {
-			// A GPV task can be accepted before GenieACS has refreshed its cache.
-			// Do not let an empty response replace the last usable cloud snapshot.
-			log.Printf("snapshot skipped for %s: GenieACS returned no managed parameters", d.GenieACSID)
+			// A read can be queued before the device dials in. Do not let an
+			// empty response replace the last usable cloud snapshot.
+			log.Printf("snapshot skipped for %s: no managed parameters yet", d.CWMPID)
 			continue
 		}
-		if err := w.cloud.SendSnapshot(ctx, d.GenieACSID, cloud.SnapshotRequest{Params: params, Source: "agent"}); err != nil {
-			log.Printf("snapshot post failed for %s: %v", d.GenieACSID, err)
+		if err := w.cloud.SendSnapshot(ctx, d.CWMPID, cloud.SnapshotRequest{Params: params, Source: "agent"}); err != nil {
+			log.Printf("snapshot post failed for %s: %v", d.CWMPID, err)
 		}
 	}
 }
@@ -194,66 +211,72 @@ func (w *Worker) handleCommands(ctx context.Context) {
 			log.Printf("ack failed for %s: %v", cmd.ID, err)
 		}
 		if ack.Status == "applied" && len(cmd.Payload.Writes) > 0 {
-			w.postCommandSnapshot(ctx, cmd.GenieACSID, ack.Result.Readback)
+			w.postCommandSnapshot(ctx, cmd.CWMPID, ack.Result.Readback)
 		}
 	}
 }
 
 func (w *Worker) apply(ctx context.Context, cmd cloud.Command) cloud.AckRequest {
+	ip := w.acs.Store().DeviceIP(cmd.CWMPID)
+	if ip == "" {
+		return failed(fmt.Errorf("no CWMP session for device %s", cmd.CWMPID))
+	}
 	switch cmd.Type {
 	case "configure", "optimise", "heal", "rollback":
-		taskID, err := w.nbi.SetParams(ctx, cmd.GenieACSID, cmd.Payload.Writes)
-		if err != nil {
-			return failed(err)
+		writes := toWrites(cmd.Payload.Writes, w.manifest)
+		res, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskSPV, Writes: writes, CmdKey: cmd.ID, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout)
+		if !ok {
+			return failed(fmt.Errorf("device session timeout applying %s", cmd.ID))
 		}
+		if res.Err != "" {
+			return failed(fmt.Errorf("device rejected write: %s", res.Err))
+		}
+		if res.Status == 1 {
+			// Status 1 = applied but takes effect after a reboot; an immediate
+			// read-back would still show the old value, so ack without verifying.
+			return cloud.AckRequest{Status: "applied", Result: cloud.AckResult{TaskID: cmd.ID, Detail: "applied; takes effect after device reboot"}}
+		}
+		// Let the device apply the write before reading it back.
 		select {
 		case <-ctx.Done():
 			return failed(ctx.Err())
 		case <-time.After(w.cfg.CommandVerifyDelay):
 		}
-		paths := writePaths(cmd.Payload.Writes)
 		expected := expectedValues(cmd.Payload)
-		readback, err := w.nbi.GetParamsMatching(ctx, cmd.GenieACSID, paths, expected, w.cfg.CommandVerifyTimeout)
-		if err != nil {
-			return failed(err)
+		rb, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskGPV, Paths: keysOf(expected), CommandID: cmd.ID + ":rb"}, w.cfg.CommandVerifyTimeout)
+		if !ok {
+			return failed(fmt.Errorf("read-back timeout for %s", cmd.ID))
 		}
+		readback := collector.ToAnyMap(rb.Params)
 		mismatch := verifyExpected(expected, readback)
-		status := "applied"
-		detail := ""
+		status, detail := "applied", ""
 		if len(mismatch) > 0 {
 			status = "failed"
 			detail = fmt.Sprintf("device read-back did not match the requested value within %s", w.cfg.CommandVerifyTimeout)
 			log.Printf("command %s verification mismatch: %+v", cmd.ID, mismatch)
 		}
-		return cloud.AckRequest{Status: status, Result: cloud.AckResult{Readback: readback, Mismatch: mismatch, TaskID: taskID, Detail: detail}}
+		return cloud.AckRequest{Status: status, Result: cloud.AckResult{Readback: readback, Mismatch: mismatch, TaskID: cmd.ID, Detail: detail}}
 	case "query":
-		// Let the GPV refresh task land before reading back (same settle budget as configure).
-		select {
-		case <-ctx.Done():
-			return failed(ctx.Err())
-		case <-time.After(w.cfg.CommandVerifyDelay):
+		res, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskGPV, Paths: cmd.Payload.ReadPaths, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout)
+		if !ok {
+			return failed(fmt.Errorf("query timeout for %s", cmd.ID))
 		}
-		readback, err := w.nbi.GetParams(ctx, cmd.GenieACSID, cmd.Payload.ReadPaths)
-		if err != nil {
-			return failed(err)
-		}
-		return cloud.AckRequest{Status: "applied", Result: cloud.AckResult{Readback: readback}}
+		return cloud.AckRequest{Status: "applied", Result: cloud.AckResult{Readback: collector.ToAnyMap(res.Params)}}
 	case "reboot":
-		taskID, err := w.nbi.Reboot(ctx, cmd.GenieACSID)
-		if err != nil {
-			return failed(err)
+		if _, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskReboot, CmdKey: cmd.ID, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout); !ok {
+			return failed(fmt.Errorf("no reboot ack for %s", cmd.ID))
 		}
-		return cloud.AckRequest{Status: "applied", Result: cloud.AckResult{TaskID: taskID}}
+		return cloud.AckRequest{Status: "applied"}
 	default:
 		return failed(fmt.Errorf("unknown command type %q", cmd.Type))
 	}
 }
 
-func (w *Worker) postCommandSnapshot(ctx context.Context, genieacsID string, readback map[string]any) {
+func (w *Worker) postCommandSnapshot(ctx context.Context, cwmpID string, readback map[string]any) {
 	if len(readback) == 0 {
 		return
 	}
-	if err := w.cloud.SendSnapshot(ctx, genieacsID, cloud.SnapshotRequest{Params: readback, Source: "command_readback"}); err != nil {
+	if err := w.cloud.SendSnapshot(ctx, cwmpID, cloud.SnapshotRequest{Params: readback, Source: "command_readback"}); err != nil {
 		log.Printf("command snapshot failed: %v", err)
 	}
 }
@@ -262,16 +285,32 @@ func failed(err error) cloud.AckRequest {
 	return cloud.AckRequest{Status: "failed", Result: cloud.AckResult{Detail: err.Error()}}
 }
 
-func writePaths(writes []cloud.Write) []string {
-	out := make([]string, 0, len(writes))
-	for _, w := range writes {
-		out = append(out, w.Path)
+// toWrites builds CWMP SetParameterValues entries, attaching the xsi:type from
+// the command (falling back to the embedded manifest, then xsd:string).
+func toWrites(writes []cloud.Write, manifest *cwmp.Manifest) []cwmp.ParameterValueStruct {
+	out := make([]cwmp.ParameterValueStruct, 0, len(writes))
+	for _, wr := range writes {
+		xsd := wr.XSDType
+		if xsd == "" && manifest != nil {
+			xsd = manifest.XSD(wr.Path)
+		}
+		if xsd == "" {
+			xsd = "xsd:string"
+		}
+		out = append(out, cwmp.ParameterValueStruct{
+			Name:  wr.Path,
+			Value: cwmp.ValueNode{Type: xsd, Text: formatValue(wr.Value)},
+		})
 	}
 	return out
 }
 
-func verify(payload cloud.CommandPayload, readback map[string]any) []map[string]any {
-	return verifyExpected(expectedValues(payload), readback)
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func expectedValues(payload cloud.CommandPayload) map[string]any {
@@ -290,9 +329,43 @@ func verifyExpected(expected map[string]any, readback map[string]any) []map[stri
 	var mismatch []map[string]any
 	for path, want := range expected {
 		got, ok := readback[path]
-		if !ok || fmt.Sprint(got) != fmt.Sprint(want) {
+		if !ok || !valuesMatch(want, got) {
 			mismatch = append(mismatch, map[string]any{"path": path, "expected": want, "actual": got, "missing": !ok})
 		}
 	}
 	return mismatch
+}
+
+// valuesMatch compares an expected value against a device read-back, tolerating
+// the CPE's canonical form for booleans (JSON true/false vs TR-069 "1"/"0").
+func valuesMatch(want, got any) bool {
+	return normalizeValue(formatValue(want)) == normalizeValue(formatValue(got))
+}
+
+// formatValue renders a command value for the wire and for comparison. Command
+// JSON numbers decode to float64; fmt's default format switches to exponent
+// form at magnitude >= 1e6 ("1e+06"), which is not a valid xsd numeric lexical
+// form and would both mis-write the device and false-fail read-back. Format
+// integer-valued floats plainly instead.
+func formatValue(v any) string {
+	if f, ok := v.(float64); ok {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return fmt.Sprint(v)
+}
+
+func normalizeValue(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true":
+		return "1"
+	case "false":
+		return "0"
+	default:
+		return s
+	}
+}
+
+func eventDedupKey(deviceID, eventType, message, ts string) string {
+	h := sha256.Sum256([]byte(deviceID + "|" + eventType + "|" + message + "|" + ts))
+	return hex.EncodeToString(h[:])
 }
