@@ -2,8 +2,8 @@
 #
 # Secrets and host-specific endpoints come from the systemd EnvironmentFile at
 # /etc/cloudlynet-agent/agent.env and override the values here:
-#   CLOUDLYNET_ENROLLMENT_TOKEN, CLOUDLYNET_BASE_URL, GENIEACS_NBI_URL,
-#   FTP_WATCH_DIR, BUFFER_DB
+#   CLOUDLYNET_ENROLLMENT_TOKEN, CLOUDLYNET_BASE_URL, CWMP_LISTEN,
+#   CWMP_CR_USER, CWMP_CR_PASS, CWMP_CR_URL_OVERRIDE, FTP_WATCH_DIR, BUFFER_DB
 # Keep the token OUT of this file so it is not world-readable.
 
 poll_interval: 10s
@@ -15,7 +15,15 @@ snapshot_interval: 5m
 command_verify_delay: 2s
 command_verify_timeout: 15s
 
-genieacs_nbi_url: "http://127.0.0.1:7557"
+# The agent IS the ACS: it binds the exact host:port the NanoLink dials
+# (Device.ManagementServer.URL). cr_* enable the optional connection-request
+# trigger; leave blank to rely on the device's periodic inform cadence.
+cwmp:
+  listen: "0.0.0.0:7547"
+  cr_user: ""
+  cr_pass: ""
+  cr_url_override: ""
+  full_snapshot_on_first_contact: true
 ftp_watch_dir: "/srv/nybsys-ftp/nybsysftp/uploads"
 rules_file: "/etc/cloudlynet-agent/rules.yaml"
 buffer_db: "/var/lib/cloudlynet-agent/buffer.sqlite"

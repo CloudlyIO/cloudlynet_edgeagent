@@ -18,6 +18,9 @@ COPY --from=builder /out/cloudlynet-agent /usr/local/bin/cloudlynet-agent
 COPY config/agent.yaml /etc/cloudlynet-agent/agent.yaml
 COPY config/rules.yaml /etc/cloudlynet-agent/rules.yaml
 
+# The agent IS the TR-069/CWMP ACS — it binds the port the NanoLink dials.
+EXPOSE 7547
+
 USER cloudlynet
 ENTRYPOINT ["/usr/local/bin/cloudlynet-agent"]
 CMD ["--config", "/etc/cloudlynet-agent/agent.yaml"]

@@ -1,6 +1,8 @@
 # cloudlynet_edgeagent
 
-CloudlyNet Edge Agent is a Go TR-069 edge process for attaching RadioDevices to the CloudlyNet platform. It runs on the edge device, calls CloudlyNet outbound through the `/v1/agent/**` REST contract, and talks to local GenieACS NBI plus the NanoLink FTP log drop.
+CloudlyNet Edge Agent is a Go TR-069 edge process for attaching RadioDevices to the CloudlyNet platform. It runs on the edge device, calls CloudlyNet outbound through the `/v1/agent/**` REST contract, and **hosts an in-agent TR-069/CWMP ACS on `:7547`** (the exact port the NanoLink already dials) so it reads and writes device parameters directly, plus it watches the NanoLink FTP log drop.
+
+> **Replaces GenieACS.** The agent used to be a GenieACS NBI client; GenieACS captured only the device name and could not push config because it had no handler for the `AutonomousTransferComplete` (ATC) RPC the NanoLink emits every ~60 s (the CWMP session faulted and died right after the Inform). The agent now answers ATC with the empty `AutonomousTransferCompleteResponse`, so sessions survive to the read/write turn. See **Migration from GenieACS** below.
 
 ## Layout
 
@@ -22,8 +24,8 @@ goagent/
   cmd/agent
   internal/config
   internal/cloud
-  internal/buffer
-  internal/genieacs
+  internal/buffer            # outbox/applied + CWMP param/event store
+  internal/cwmp              # in-agent TR-069/CWMP ACS (:7547) + ATC handler
   internal/rules
   internal/collector
   internal/worker
@@ -39,18 +41,19 @@ The prompt used `testsuire`; the implemented directory is the corrected `testsui
 - Decodes the enrollment token from `agent.yaml` or `CLOUDLYNET_ENROLLMENT_TOKEN`.
 - Sends `X-Edge-Key` to the CloudlyNet Agent API.
 - Registers, heartbeats inventory, polls commands, posts telemetry, posts config snapshots, and acks commands.
-- Reads the complete 24-path NanoLink managed-parameter catalogue for configuration snapshots. Because GenieACS GPV is asynchronous, the snapshot read waits briefly for the requested cache values; an empty response is logged and skipped rather than published as a blank configuration.
-- Treats GenieACS `_id` as an opaque value. A literal percent escape in an ID (for example `%2D`) is escaped again when used as the `config-snapshot` URL path parameter, so SMO receives the same ID that heartbeat and telemetry persist.
-- Treats every device write as a closed-loop operation: after `setParameterValues`, waits `command_verify_delay`, then polls a fresh GPV read until all requested values match or `command_verify_timeout` expires (15s in production). A failed acknowledgement includes the actual read-back, so the dashboard can show the device value that prevented the update.
+- Reads the complete 24-path NanoLink managed-parameter catalogue for configuration snapshots. Because a device read only lands when the NanoLink dials in, the snapshot read waits briefly for a fresh value and falls back to the last cached value; an empty result is logged and skipped rather than published as a blank configuration.
+- Uses one canonical device id (`cwmp_id`, computed from the Inform `DeviceID` — byte-identical to the id the previous ACS stored). A literal percent escape in the id (for example `%2D`) is escaped again when used as the `config-snapshot` URL path parameter, so SMO receives the same id that heartbeat and telemetry persist.
+- Treats every device write as a closed-loop operation: after `SetParameterValues`, waits `command_verify_delay`, then reads back with `GetParameterValues` until all requested values match or `command_verify_timeout` expires (15s in production). A failed acknowledgement includes the actual read-back, so the dashboard can show the device value that prevented the update.
 - Retries registration on heartbeat until CloudlyNet accepts it, so a late gateway/port-forward does not require restarting the agent container.
-- Emits lifecycle logs (startup, registration, baseline, per-command result) for observability.
-- Uses local SQLite for telemetry outbox retry and applied-command dedupe.
-- Uses GenieACS NBI for inventory, GPV, SPV with `connection_request`, reboot, and the baseline ATC policy fix (applied **once per NanoLink**).
+- Emits lifecycle logs (startup, `[CWMP] ACS listening on …`, per-Inform/ATC, per-command result) for observability.
+- Uses local SQLite for telemetry outbox retry, applied-command dedupe, and the CWMP device/parameter/event store.
+- **Is the ACS:** it answers the device's Inform and `AutonomousTransferComplete` (the RPC GenieACS never handled), reads via `GetParameterValues`, writes via `SetParameterValues`, walks `GetParameterNames` once on first contact for authoritative writability, and reboots — all over the in-agent `:7547` listener. An optional connection-request trigger sharpens apply latency below the device's ~60 s inform cadence.
+- Emits an `autonomous_transfer_complete` event on each ATC into the telemetry batch (smo-sim ingests it).
 - Parses FTP `.tgz` logs into deterministic telemetry events using `config/rules.yaml`; the processed-archive set is pruned to the current directory contents so it stays bounded.
 
 ## Telemetry tiering (handover §3.4)
 
-The collector reads canonical metric keys per tier from GenieACS and POSTs each tier at its own cadence (keys absent on a device are omitted; the cloud's `metrics` object is open):
+The collector reads canonical metric keys per tier from the CWMP parameter cache (refreshed by queued `GetParameterValues` reads) and POSTs each tier at its own cadence (keys absent on a device are omitted; the cloud's `metrics` object is open):
 
 - **T1 (30 s, live):** `op_state`, `rf_tx_status`, `admin_state`, `s1_status`, `sctp_status`, `connected_ues`, `volte_ues`.
 - **T2 (60 s, RF/coverage):** `rip_average`, `rip_prb`, `rip_threshold`, `earfcn_dl_inuse`, `pci_inuse`, `rs_power`, `dl_bw`, `ul_bw`.
@@ -88,10 +91,12 @@ journalctl -u cloudlynet-edgeagent -f
    start command.
 
 Secrets and host endpoints live in `/etc/cloudlynet-agent/agent.env`
-(`CLOUDLYNET_ENROLLMENT_TOKEN`, optional `CLOUDLYNET_BASE_URL`,
-`GENIEACS_NBI_URL`, `FTP_WATCH_DIR`, `BUFFER_DB`) and override
-`/etc/cloudlynet-agent/agent.yaml`. GenieACS NBI and the FTP log-drop dir are
-assumed to already exist on the box.
+(`CLOUDLYNET_ENROLLMENT_TOKEN`, optional `CLOUDLYNET_BASE_URL`, `CWMP_LISTEN`,
+optional `CWMP_CR_USER` / `CWMP_CR_PASS` / `CWMP_CR_URL_OVERRIDE`,
+`FTP_WATCH_DIR`, `BUFFER_DB`) and override `/etc/cloudlynet-agent/agent.yaml`.
+The agent binds `CWMP_LISTEN` (default `0.0.0.0:7547`) — the exact address the
+NanoLink dials — so any prior ACS on that port must be stopped first (see
+**Migration from GenieACS**). The FTP log-drop dir is assumed to already exist.
 
 Common `make` targets: `build`, `test`, `vet`, `run`, `install`, `uninstall`,
 `docker-build`, `docker-up`, `docker-down`, `docker-logs` (`make help` lists all).
@@ -107,11 +112,11 @@ curl http://localhost:9000/health
 docker compose down -v
 ```
 
-The testsuite container mocks both CloudlyNet `/v1/agent/**` on port `9000` and GenieACS NBI on port `7557`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, acked configure/query/reboot commands, and delivered all 24 managed configuration paths.
+The testsuite container mocks the CloudlyNet `/v1/agent/**` cloud on port `9000` **and plays a mock NanoLink CWMP device** that dials the agent's in-agent ACS at `:7547` (Inform → ATC → GPV/SPV/GPN/Reboot), plus a connection-request listener on `:30005`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, acked configure/query/reboot commands over CWMP, and delivered all 24 managed configuration paths — with the ATC session completing (no Fault).
 
 ## Live Platform Validation
 
-Use `EDGEAGENT_TESTSUITE_MODE=acsftp` when CloudlyNet/NetAI is already deployed and only local GenieACS + FTP should be mocked. The testsuite health endpoint remains on `9000`, but `/v1/agent/**` is not mocked in this mode.
+Use `EDGEAGENT_TESTSUITE_MODE=acsftp` when CloudlyNet/NetAI is already deployed and only the local CWMP device + FTP should be mocked (the agent talks to a real cloud). The testsuite health endpoint remains on `9000`, but `/v1/agent/**` is not mocked in this mode.
 
 ```bash
 EDGEAGENT_TESTSUITE_MODE=acsftp \
@@ -126,6 +131,38 @@ Production enrollment tokens should embed `https://netai.cloudly.io/`. If you ar
 older token that still contains `http://localhost:8080`, temporarily add
 `CLOUDLYNET_BASE_URL='https://netai.cloudly.io/'` to the command above; regenerate the edge key in
 the dashboard after SMO Sim is deployed with the corrected `PUBLIC_BASE_URL`.
+
+## Migration from GenieACS (on-box, server-side only — no device change)
+
+The agent binds the exact `host:port` GenieACS used (`Device.ManagementServer.URL`,
+e.g. `192.168.8.100:7547`), so cutover is server-side only — the NanoLink keeps
+informing to the same address and never notices.
+
+1. **Stop and disable GenieACS + its Mongo/Node runtime** on the edge box, and
+   confirm `:7547` is free:
+   ```bash
+   sudo systemctl stop  genieacs-cwmp genieacs-nbi genieacs-ui genieacs-fs
+   sudo systemctl disable genieacs-cwmp genieacs-nbi genieacs-ui genieacs-fs
+   sudo systemctl stop mongod    # GenieACS storage — no longer needed
+   sudo ss -ltnp | grep 7547     # should be empty before starting the agent
+   ```
+2. **Deploy the agent** (native/systemd per *Edge Device Install* above). Confirm
+   the log line `[CWMP] ACS listening on 0.0.0.0:7547`, then a device
+   `Inform` followed by an `ATC` with **no Fault** (session survives), and a
+   first-contact `GetParameterNames` writability walk.
+3. **Converge the cloud device row.** The heartbeat now reports the canonical
+   `%2D`-encoded id as `cwmp_id`; the stale un-escaped phantom row is removed by
+   the cloud migration (sibling dev issue), not by the agent.
+4. **Validate push** from the dashboard (edit e.g. `PeriodicInformInterval`) →
+   command reaches `applied` with a matching read-back.
+
+Three on-box processes (GenieACS CWMP/NBI/UI) + MongoDB + the Node.js runtime
+collapse to one agent binary.
+
+> **Codec fixtures / pcap:** the CWMP codec round-trip tests are built from the
+> NanoLink parameter manifest + the TR-069 spec; no real captured-bytes pcap was
+> available. Real-bytes round-trip proof is part of on-device validation, which
+> is tracked separately (lab-access gated).
 
 ## Root Compose
 
