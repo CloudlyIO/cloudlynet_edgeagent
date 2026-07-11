@@ -7,7 +7,9 @@ telemetry_t3_interval: 30s
 snapshot_interval: 10s
 command_verify_delay: 500ms
 command_verify_timeout: 3s
-genieacs_nbi_url: "http://cloudlynet-edgeagent-testsuite:7557"
+cwmp:
+  listen: "0.0.0.0:7547"
+  full_snapshot_on_first_contact: true
 ftp_watch_dir: "/srv/nybsys-ftp/nybsysftp/uploads"
 rules_file: "/etc/cloudlynet-agent/rules.yaml"
 buffer_db: "/var/lib/cloudlynet-agent/buffer.sqlite"

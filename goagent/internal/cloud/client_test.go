@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-func TestSendSnapshotEscapesLiteralPercentInGenieACSIdentifier(t *testing.T) {
-	const genieacsID = "8C1F64-ENB%2DN03002%2DB3-2205600282"
+func TestSendSnapshotEscapesLiteralPercentInCWMPIdentifier(t *testing.T) {
+	const cwmpID = "8C1F64-ENB%2DN03002%2DB3-2205600282"
 	var escapedPath string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		escapedPath = r.URL.EscapedPath()
-		if got := r.URL.Path; got != "/v1/agent/devices/"+genieacsID+"/config-snapshot" {
+		if got := r.URL.Path; got != "/v1/agent/devices/"+cwmpID+"/config-snapshot" {
 			t.Fatalf("decoded request path = %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -22,7 +22,7 @@ func TestSendSnapshotEscapesLiteralPercentInGenieACSIdentifier(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL, "test-edge-key")
-	err := client.SendSnapshot(context.Background(), genieacsID, SnapshotRequest{
+	err := client.SendSnapshot(context.Background(), cwmpID, SnapshotRequest{
 		Params: map[string]any{"Device.ManagementServer.PeriodicInformInterval": 300},
 		Source: "agent",
 	})

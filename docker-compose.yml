@@ -10,11 +10,15 @@ services:
     environment:
       CLOUDLYNET_ENROLLMENT_TOKEN: ${CLOUDLYNET_ENROLLMENT_TOKEN:-eyJ2IjoxLCJ0ZW5hbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMzAyOS0wMDAwMDAwMDAwMDEiLCJlZGdlX2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIiwiYmFzZV91cmwiOiJodHRwOi8vY2xvdWRseW5ldC1lZGdlYWdlbnQtdGVzdHN1aXRlOjkwMDAiLCJhcGlfa2V5IjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExLmRldnNlY3JldCJ9}
       CLOUDLYNET_BASE_URL: ${CLOUDLYNET_BASE_URL:-http://cloudlynet-edgeagent-testsuite:9000}
-      GENIEACS_NBI_URL: ${GENIEACS_NBI_URL:-http://cloudlynet-edgeagent-testsuite:7557}
+      CWMP_LISTEN: 0.0.0.0:7547
+      # The mock device's connection-request listener; sharpens command latency.
+      CWMP_CR_URL_OVERRIDE: http://cloudlynet-edgeagent-testsuite:30005/
       FTP_WATCH_DIR: /srv/nybsys-ftp/nybsysftp/uploads
       BUFFER_DB: /var/lib/cloudlynet-agent/buffer.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    ports:
+      - "${EDGEAGENT_CWMP_PORT:-7547}:7547"
     volumes:
       - edgeagent_buffer:/var/lib/cloudlynet-agent
       - edgeagent_ftp:/srv/nybsys-ftp/nybsysftp/uploads
@@ -33,9 +37,10 @@ services:
     environment:
       FTP_DIR: /ftp
       TESTSUITE_MODE: ${EDGEAGENT_TESTSUITE_MODE:-full}
+      # The mock NanoLink device dials the agent's in-agent CWMP ACS.
+      AGENT_CWMP_URL: http://cloudlynet-edgeagent:7547/
     ports:
       - "${EDGEAGENT_TESTSUITE_PORT:-9000}:9000"
-      - "${EDGEAGENT_GENIEACS_PORT:-7557}:7557"
     volumes:
       - edgeagent_ftp:/ftp
     healthcheck:

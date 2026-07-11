@@ -52,6 +52,34 @@ CREATE TABLE IF NOT EXISTS applied(
   status TEXT NOT NULL,
   result BLOB,
   applied_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cwmp_devices(
+  device_id TEXT PRIMARY KEY,
+  ip TEXT,
+  manufacturer TEXT,
+  product_class TEXT,
+  serial_number TEXT,
+  sw_version TEXT,
+  last_inform_at INTEGER,
+  writability_loaded INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS cwmp_params(
+  device_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  value TEXT,
+  writable INTEGER,
+  cached_at INTEGER NOT NULL,
+  PRIMARY KEY (device_id, path)
+);
+CREATE TABLE IF NOT EXISTS cwmp_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id TEXT NOT NULL,
+  module TEXT,
+  event_type TEXT,
+  severity TEXT,
+  message TEXT,
+  ts INTEGER NOT NULL,
+  uploaded INTEGER NOT NULL DEFAULT 0
 );`)
 	return err
 }

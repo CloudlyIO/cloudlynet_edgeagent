@@ -9,5 +9,6 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates curl tzdata && update-ca-certificates
 WORKDIR /app
 COPY --from=builder /out/cloudlynet-edgeagent-testsuite /app/cloudlynet-edgeagent-testsuite
-EXPOSE 9000 7557
+# 9000 = mock cloud; 30005 = mock device's connection-request listener.
+EXPOSE 9000 30005
 ENTRYPOINT ["/app/cloudlynet-edgeagent-testsuite"]
