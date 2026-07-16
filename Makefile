@@ -17,7 +17,7 @@ GO_BUILD_ENV := CGO_ENABLED=0
 .DEFAULT_GOAL := help
 
 .PHONY: help build test vet fmt run clean install uninstall \
-        docker-build docker-up docker-down docker-logs
+        docker-build docker-up docker-down docker-logs sync-manifest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -60,3 +60,7 @@ docker-down: ## Stop and remove the local test stack
 
 docker-logs: ## Tail edge agent container logs
 	docker compose logs -f cloudlynet-edgeagent
+
+sync-manifest: ## Copy the in-repo NanoLink manifest into testsuite's embedded asset (single source of truth)
+	cp $(GOAGENT_DIR)/internal/cwmp/assets/nanolink_param_manifest.json testsuite/assets/nanolink_param_manifest.json
+	@echo "synced testsuite/assets/nanolink_param_manifest.json from $(GOAGENT_DIR)/internal/cwmp/assets/"
