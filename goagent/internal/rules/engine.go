@@ -121,7 +121,7 @@ func event(device, ts, module, eventType, severity, message, raw string) cloud.E
 		Severity:  severity,
 		Message:   message,
 		Attrs:     map[string]any{"raw": raw},
-		DedupKey:  dedup(device, ts, eventType, raw),
+		DedupKey:  dedup(device, eventType, raw),
 	}
 }
 
@@ -130,8 +130,14 @@ func alarmy(line string) bool {
 	return strings.Contains(l, "alarm") || strings.Contains(l, "fault") || strings.Contains(l, "fail") || strings.Contains(l, "error")
 }
 
-func dedup(device, ts, eventType, raw string) string {
+// dedup builds a CONTENT-derived dedup key: (device, eventType, raw). It
+// deliberately omits parse time — the raw line already carries the device's own
+// sequence number + timestamp, so the same log line yields the same key whether
+// it arrives via the continuous ring or the Devicelog (they overlap on the real
+// device) or is re-parsed after an agent restart. The cloud dedups on this key
+// (ON CONFLICT(dedup_key)); a parse-time component would defeat that.
+func dedup(device, eventType, raw string) string {
 	lineHash := sha1.Sum([]byte(raw))
-	h := sha256.Sum256([]byte(device + "|" + ts + "|" + eventType + "|" + hex.EncodeToString(lineHash[:])))
+	h := sha256.Sum256([]byte(device + "|" + eventType + "|" + hex.EncodeToString(lineHash[:])))
 	return hex.EncodeToString(h[:])
 }

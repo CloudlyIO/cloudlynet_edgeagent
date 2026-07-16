@@ -2,6 +2,27 @@ package rules
 
 import "testing"
 
+// TestDedupKeyContentDerived locks in the fix: the dedup key must be derived
+// from (device, eventType, raw) only — no parse-time component — so the same
+// log line yields the same key across separate parses (ring vs Devicelog
+// overlap, and post-restart re-parse), letting the cloud dedup it.
+func TestDedupKeyContentDerived(t *testing.T) {
+	e := DefaultEngine()
+	line := "0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0)"
+	first := e.Apply([]string{line}, "dev-1")
+	second := e.Apply([]string{line}, "dev-1")
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("events = %d and %d, want 1 each", len(first), len(second))
+	}
+	if first[0].DedupKey != second[0].DedupKey {
+		t.Errorf("dedup key not stable across parses: %q vs %q", first[0].DedupKey, second[0].DedupKey)
+	}
+	other := e.Apply([]string{"0000000218 2024-06-02 23:51:23.000 [FILE_TRANS] File upload success, curl code=(0)"}, "dev-1")
+	if len(other) == 1 && other[0].DedupKey == first[0].DedupKey {
+		t.Errorf("distinct raw lines must not share a dedup key")
+	}
+}
+
 func TestDefaultRules(t *testing.T) {
 	events := DefaultEngine().Apply([]string{"0000000031 2024-06-02 07:03:19.616 [TR69] RPC Unknown received from ACS"}, "dev-1")
 	if len(events) != 1 {
