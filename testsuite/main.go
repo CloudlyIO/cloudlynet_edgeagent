@@ -51,6 +51,26 @@ type state struct {
 	// "unknown").
 	typedEvents            map[string]struct{}
 	sawCanonicalTypedEvent bool
+	// expectedEvent is the typed event the selected scenario must produce — the
+	// gate asserts it specifically (not just "some typed event"), so a scenario
+	// whose own signal silently stopped classifying can't still go green.
+	expectedEvent string
+	// seenDedup dedups by dedup_key like the real cloud (ON CONFLICT(dedup_key)),
+	// so an alarm arriving via both the ring and the Devicelog — or re-emitted
+	// after an agent restart — is counted once, not double.
+	seenDedup map[string]struct{}
+}
+
+// scenarioEventType maps each scenario to the typed event its staged fault line
+// must classify to (kept in lockstep with loggen.scenarioLines / the rules).
+var scenarioEventType = map[loggen.Scenario]string{
+	loggen.ScenarioHappy:         "ftp_upload_ok",
+	loggen.ScenarioFTPPathReject: "ftp_upload_path_reject",
+	loggen.ScenarioFTPAuthFail:   "ftp_auth_fail",
+	loggen.ScenarioFTPConnFail:   "ftp_conn_fail",
+	loggen.ScenarioFTPTimeout:    "ftp_upload_timeout",
+	loggen.ScenarioATCFault:      "atc_fault_loop",
+	loggen.ScenarioReboot:        "device_reboot",
 }
 
 const managedSnapshotParamCount = 24
@@ -96,7 +116,13 @@ func main() {
 		log.Fatalf("nanolink manifest load failed: %v", err)
 	}
 
-	st := &state{acks: map[string]string{}, snapshotParams: map[string]any{}, typedEvents: map[string]struct{}{}}
+	st := &state{
+		acks:          map[string]string{},
+		snapshotParams: map[string]any{},
+		typedEvents:   map[string]struct{}{},
+		seenDedup:     map[string]struct{}{},
+		expectedEvent: scenarioEventType[loggen.Scenario(cfg.Scenario)],
+	}
 	dev := newDevice(m)
 
 	ftpDir := env("FTP_DIR", "/ftp")
@@ -134,9 +160,11 @@ func cloudMux(st *state) http.Handler {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
+		_, sawExpected := st.typedEvents[st.expectedEvent]
+		sawExpected = sawExpected || st.expectedEvent == ""
 		ok := st.registered > 0 && st.heartbeats > 0 && st.telemetry > 0 && st.events > 0 &&
 			st.failures > 0 && st.snapshots > 0 && len(st.snapshotParams) == managedSnapshotParamCount && len(st.acks) >= 3 &&
-			len(st.typedEvents) > 0 && st.sawCanonicalTypedEvent
+			len(st.typedEvents) > 0 && st.sawCanonicalTypedEvent && sawExpected
 		typed := make([]string, 0, len(st.typedEvents))
 		for t := range st.typedEvents {
 			typed = append(typed, t)
@@ -154,6 +182,8 @@ func cloudMux(st *state) http.Handler {
 			"acks":                     st.acks,
 			"typed_events":             typed,
 			"typed_event_on_canonical": st.sawCanonicalTypedEvent,
+			"expected_event":           st.expectedEvent,
+			"saw_expected_event":       sawExpected,
 		})
 	})
 	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, r *http.Request) {
@@ -182,13 +212,24 @@ func cloudMux(st *state) http.Handler {
 			Events []struct {
 				CWMPID    string `json:"cwmp_id"`
 				EventType string `json:"event_type"`
+				DedupKey  string `json:"dedup_key"`
 			} `json:"events"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		st.mu.Lock()
 		st.telemetry++
-		st.events += len(body.Events)
 		for _, e := range body.Events {
+			// Dedup by dedup_key like the real cloud (ON CONFLICT(dedup_key)): an
+			// alarm line arrives via both the ring and the Devicelog, and a
+			// restart re-parses the watch dir — the content-derived key (see
+			// rules.dedup) collapses those here instead of double-counting.
+			if e.DedupKey != "" {
+				if _, dup := st.seenDedup[e.DedupKey]; dup {
+					continue
+				}
+				st.seenDedup[e.DedupKey] = struct{}{}
+			}
+			st.events++
 			if e.EventType == "" || e.EventType == "unclassified" {
 				continue
 			}
