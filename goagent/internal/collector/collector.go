@@ -69,19 +69,25 @@ var SnapshotPaths = []string{
 	autonomousTransferCompletePolicy,
 }
 
+// maxDeferTicks bounds how long scanFTP defers an upload from a not-yet-known
+// device (~30 ticks at the 2s poll interval == ~60s), matching the real
+// device's own Inform/upload cadence so a cold-start race resolves on its own.
+const maxDeferTicks = 30
+
 // Collector reads device state from the in-agent CWMP ACS (params cached from
 // Informs + GPV responses) and parses NanoLink FTP log archives into events.
 type Collector struct {
-	acs     *cwmp.Server
-	rules   *rules.Engine
-	ftpDir  string
-	mu      sync.Mutex
-	events  []cloud.EventItem
-	seenTGZ map[string]struct{}
+	acs       *cwmp.Server
+	rules     *rules.Engine
+	ftpDir    string
+	mu        sync.Mutex
+	events    []cloud.EventItem
+	seenPaths map[string]struct{}
+	deferred  map[string]int
 }
 
 func New(acs *cwmp.Server, ruleEngine *rules.Engine, ftpDir string) *Collector {
-	return &Collector{acs: acs, rules: ruleEngine, ftpDir: ftpDir, seenTGZ: map[string]struct{}{}}
+	return &Collector{acs: acs, rules: ruleEngine, ftpDir: ftpDir, seenPaths: map[string]struct{}{}, deferred: map[string]int{}}
 }
 
 // Inventory builds the device inventory from the CWMP store, enriching liveness
@@ -207,31 +213,110 @@ func (c *Collector) scanFTP() {
 	}
 	present := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tgz") {
+		if e.IsDir() || !isLogUpload(e.Name()) {
 			continue
 		}
 		path := filepath.Join(c.ftpDir, e.Name())
 		present[path] = struct{}{}
-		if _, ok := c.seenTGZ[path]; ok {
+		if _, ok := c.seenPaths[path]; ok {
 			continue
 		}
-		c.seenTGZ[path] = struct{}{}
-		events, err := c.eventsFromArchive(path)
+
+		deviceID, known := c.resolveDeviceID(path)
+		if !known {
+			c.deferred[path]++
+			if c.deferred[path] < maxDeferTicks {
+				// Not yet onboarded (Inform hasn't landed): re-scanned next poll
+				// rather than silently dropped or mis-keyed to a phantom device.
+				continue
+			}
+			deviceID = unresolvedID(path)
+			log.Printf("ftp upload from unresolved device after %d ticks; processing under sentinel id %s: %s", maxDeferTicks, deviceID, path)
+		}
+		c.seenPaths[path] = struct{}{}
+		delete(c.deferred, path)
+
+		events, err := c.parseUpload(path, deviceID)
 		if err != nil {
-			log.Printf("ftp archive parse failed: %v", err)
+			log.Printf("ftp upload parse failed: %v", err)
 			continue
 		}
 		c.QueueEvents(events)
 	}
-	// Keep seenTGZ bounded by the directory contents: forget archives that have rotated away.
-	for p := range c.seenTGZ {
+	// Keep seenPaths/deferred bounded by the directory contents: forget entries
+	// that have rotated away.
+	for p := range c.seenPaths {
 		if _, ok := present[p]; !ok {
-			delete(c.seenTGZ, p)
+			delete(c.seenPaths, p)
+		}
+	}
+	for p := range c.deferred {
+		if _, ok := present[p]; !ok {
+			delete(c.deferred, p)
 		}
 	}
 }
 
-func (c *Collector) eventsFromArchive(path string) ([]cloud.EventItem, error) {
+// isLogUpload matches the two real NanoLink upload shapes: the gzipped ring
+// archive and the bare (uncompressed, no .tgz) Devicelog alarm log.
+func isLogUpload(name string) bool {
+	return strings.HasSuffix(name, ".tgz") || strings.HasSuffix(name, "_Devicelog")
+}
+
+// parseUpload dispatches to the tar/gzip or bare-log reader by file shape; both
+// share the same already-resolved deviceID (the parser never re-resolves).
+func (c *Collector) parseUpload(path, deviceID string) ([]cloud.EventItem, error) {
+	if strings.HasSuffix(path, ".tgz") {
+		return c.eventsFromArchive(path, deviceID)
+	}
+	return c.eventsFromLog(path, deviceID)
+}
+
+// resolveDeviceID resolves a real NanoLink upload's canonical device id via
+// the cwmp_devices store the CWMP Inform populates. The upload filename
+// carries only OUI+serial (no ProductClass), so the canonical id
+// (OUI-ProductClass-Serial) cannot be reconstructed from the filename alone —
+// OUI+serial uniquely identify the single onboarded device.
+func (c *Collector) resolveDeviceID(path string) (canonicalID string, known bool) {
+	oui, serial := ouiSerialFromName(path)
+	if oui == "" || serial == "" {
+		return "", false
+	}
+	for _, d := range c.acs.Store().ListDevices() {
+		// Delimiter-bound: CanonicalID always joins OUI-ProductClass-Serial with
+		// "-" (percent-encoding any literal "-" inside a component first), so
+		// "-" only ever appears as the field separator. A bare HasPrefix(d.DeviceID,
+		// oui) would also match a stored record whose OUI is a superstring of
+		// this one (e.g. a corrupted/duplicate "8C1F644-..." row matching
+		// "8C1F64") purely as a string prefix — mis-keying to a phantom device,
+		// exactly what this resolver exists to prevent.
+		if d.SerialNumber == serial && strings.HasPrefix(d.DeviceID, oui+"-") {
+			return d.DeviceID, true
+		}
+	}
+	return "", false
+}
+
+// ouiSerialFromName splits a real upload filename's leading OUI_serial
+// tokens, e.g. "8C1F64_2205600282_PowerOn_20240602_235010_continuouslogging.tgz".
+func ouiSerialFromName(path string) (oui, serial string) {
+	base := strings.TrimSuffix(filepath.Base(path), ".tgz")
+	parts := strings.SplitN(base, "_", 3)
+	if len(parts) < 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
+// unresolvedID is the sentinel used once a deferred upload exhausts
+// maxDeferTicks — an orphan log is loudly surfaced, never silently dropped or
+// mis-keyed to a phantom device.
+func unresolvedID(path string) string {
+	oui, serial := ouiSerialFromName(path)
+	return "unresolved:" + oui + "_" + serial
+}
+
+func (c *Collector) eventsFromArchive(path, deviceID string) ([]cloud.EventItem, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -259,32 +344,21 @@ func (c *Collector) eventsFromArchive(path string) ([]cloud.EventItem, error) {
 		if err != nil {
 			return nil, err
 		}
-		module := moduleFromName(h.Name)
 		lines := strings.Split(string(b), "\n")
-		out = append(out, c.rules.Apply(module, lines, deviceFromName(path))...)
+		out = append(out, c.rules.Apply(lines, deviceID)...)
 	}
 }
 
-func moduleFromName(name string) string {
-	up := strings.ToUpper(name)
-	switch {
-	case strings.Contains(up, "FILE_TRANS"):
-		return "FILE_TRANS"
-	case strings.Contains(up, "TR69"):
-		return "TR69"
-	case strings.Contains(up, "FM"):
-		return "FM"
-	default:
-		return "UNKNOWN"
+// eventsFromLog handles a bare (non-archive) upload — the real Devicelog,
+// which carries the same "<seq> <ts> [MODULE] <msg>" line format as the ring
+// archive entries but is uploaded uncompressed with no .tgz extension (A′).
+func (c *Collector) eventsFromLog(path, deviceID string) ([]cloud.EventItem, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-}
-
-func deviceFromName(path string) string {
-	base := strings.TrimSuffix(filepath.Base(path), ".tgz")
-	if i := strings.Index(base, "_"); i > 0 {
-		return base[:i]
-	}
-	return base
+	lines := strings.Split(string(b), "\n")
+	return c.rules.Apply(lines, deviceID), nil
 }
 
 // ToAnyMap widens a CWMP string param map to the map[string]any the cloud DTOs
