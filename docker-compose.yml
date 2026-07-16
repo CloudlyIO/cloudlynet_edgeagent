@@ -25,6 +25,8 @@ services:
     depends_on:
       cloudlynet-edgeagent-testsuite:
         condition: service_healthy
+      ftp:
+        condition: service_healthy
     networks:
       - cloudlynet-edge
 
@@ -39,12 +41,74 @@ services:
       TESTSUITE_MODE: ${EDGEAGENT_TESTSUITE_MODE:-full}
       # The mock NanoLink device dials the agent's in-agent CWMP ACS.
       AGENT_CWMP_URL: http://cloudlynet-edgeagent:7547/
+      # The mock device curl-uploads logs to the FTP root, like the real NanoLink.
+      FTP_HOST: ftp
+      FTP_USER: ${FTP_USER:-nybsys}
+      FTP_PASS: ${FTP_PASS:-nybsys-local-test}
+      # One of: happy | ftp-path-reject | ftp-auth-fail | ftp-conn-fail |
+      # ftp-timeout | atc-fault | reboot (see testsuite/README.md).
+      NANOLINK_SCENARIO: ${EDGEAGENT_TESTSUITE_SCENARIO:-happy}
     ports:
       - "${EDGEAGENT_TESTSUITE_PORT:-9000}:9000"
-    volumes:
-      - edgeagent_ftp:/ftp
+    depends_on:
+      ftp:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - cloudlynet-edge
+
+  # One-shot: stages the /uploads dir the "ftp-path-reject" scenario targets.
+  # It must EXIST but be write-protected — CWD succeeds, STOR fails — to
+  # reproduce curl (25) (STOR denied) rather than curl (9) (CWD denied, if
+  # the dir were simply absent). Matches the real box: the corpus's /uploads
+  # curl(25) failures were STOR-denied, not missing-directory failures.
+  ftp-init:
+    image: alpine:3.20
+    container_name: cloudlynet_edgeagent_ftp_init
+    command: ["sh", "-c", "mkdir -p /data/uploads && chown 0:0 /data/uploads && chmod 555 /data/uploads"]
+    volumes:
+      - edgeagent_ftp:/data
+    networks:
+      - cloudlynet-edge
+
+  # vsftpd ingress (finding C): the mock device curl-uploads real-shaped log
+  # archives here, exactly like the real NanoLink; vsftpd writes into the
+  # shared edgeagent_ftp volume the agent's WatchFTP polls. No agent code
+  # change — the agent still just watches a directory.
+  #
+  # Image: delfer/alpine-ftp-server (real vsftpd on Alpine, genuinely
+  # multi-arch amd64/arm64). fauria/vsftpd (CentOS7/amd64-only) was tried
+  # first but crashes under Rosetta/QEMU x86 emulation on Apple Silicon dev
+  # boxes ("rosetta error: mmap_anonymous_rw mmap failed") — an emulation
+  # bug, not a config issue, but it blocks local validation on those laptops.
+  ftp:
+    image: delfer/alpine-ftp-server
+    container_name: cloudlynet_edgeagent_ftp
+    restart: unless-stopped
+    environment:
+      # user|password|home-dir — home dir is the FTP root == the agent's watch dir.
+      USERS: ${FTP_USER:-nybsys}|${FTP_PASS:-nybsys-local-test}|/home/vsftpd/nybsys
+      # ADDRESS names the compose service; the image's vsftpd.conf already sets
+      # pasv_addr_resolve=YES so a service name (not a raw IP) resolves.
+      # Bounded passive-port range is the knob that produces a real curl
+      # (25)/(28) when misconfigured (see docs/task_docs .../ref/ftp_server_and_test_flow.md §5).
+      ADDRESS: ftp
+      MIN_PORT: "21100"
+      MAX_PORT: "21110"
+    volumes:
+      # FTP root "/" == the agent's watch dir (both mount the same volume).
+      - edgeagent_ftp:/home/vsftpd/nybsys
+    depends_on:
+      ftp-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # 127.0.0.1, not localhost: vsftpd here only listens on IPv4 and
+      # "localhost" resolves to ::1 first in this image, giving a false unhealthy.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 21 || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 30
