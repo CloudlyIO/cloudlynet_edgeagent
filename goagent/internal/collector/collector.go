@@ -74,20 +74,28 @@ var SnapshotPaths = []string{
 // device's own Inform/upload cadence so a cold-start race resolves on its own.
 const maxDeferTicks = 30
 
+// maxParseRetries bounds how many polls a failing parse is retried before the
+// upload is given up on. A real curl→vsftpd STOR is non-atomic, so a 2s poll
+// can catch a large .tgz mid-write (a truncated gzip); retrying a few polls
+// lets the upload finish rather than dropping it permanently, while a genuinely
+// corrupt file is eventually abandoned instead of re-parsed forever.
+const maxParseRetries = 5
+
 // Collector reads device state from the in-agent CWMP ACS (params cached from
 // Informs + GPV responses) and parses NanoLink FTP log archives into events.
 type Collector struct {
-	acs       *cwmp.Server
-	rules     *rules.Engine
-	ftpDir    string
-	mu        sync.Mutex
-	events    []cloud.EventItem
-	seenPaths map[string]struct{}
-	deferred  map[string]int
+	acs        *cwmp.Server
+	rules      *rules.Engine
+	ftpDir     string
+	mu         sync.Mutex
+	events     []cloud.EventItem
+	seenPaths  map[string]struct{}
+	deferred   map[string]int
+	parseFails map[string]int
 }
 
 func New(acs *cwmp.Server, ruleEngine *rules.Engine, ftpDir string) *Collector {
-	return &Collector{acs: acs, rules: ruleEngine, ftpDir: ftpDir, seenPaths: map[string]struct{}{}, deferred: map[string]int{}}
+	return &Collector{acs: acs, rules: ruleEngine, ftpDir: ftpDir, seenPaths: map[string]struct{}{}, deferred: map[string]int{}, parseFails: map[string]int{}}
 }
 
 // Inventory builds the device inventory from the CWMP store, enriching liveness
@@ -233,14 +241,21 @@ func (c *Collector) scanFTP() {
 			deviceID = unresolvedID(path)
 			log.Printf("ftp upload from unresolved device after %d ticks; processing under sentinel id %s: %s", maxDeferTicks, deviceID, path)
 		}
-		c.seenPaths[path] = struct{}{}
-		delete(c.deferred, path)
-
 		events, err := c.parseUpload(path, deviceID)
 		if err != nil {
-			log.Printf("ftp upload parse failed: %v", err)
+			// Retry a bounded number of polls before giving up — a large .tgz
+			// caught mid-STOR fails to gunzip but completes shortly. The file is
+			// NOT marked seen until it parses, so a still-uploading archive is
+			// re-attempted rather than dropped.
+			c.parseFails[path]++
+			if c.parseFails[path] < maxParseRetries {
+				continue
+			}
+			log.Printf("ftp upload parse failed after %d attempts, giving up: %s: %v", maxParseRetries, path, err)
+			c.markSeen(path)
 			continue
 		}
+		c.markSeen(path)
 		c.QueueEvents(events)
 	}
 	// Keep seenPaths/deferred bounded by the directory contents: forget entries
@@ -255,6 +270,19 @@ func (c *Collector) scanFTP() {
 			delete(c.deferred, p)
 		}
 	}
+	for p := range c.parseFails {
+		if _, ok := present[p]; !ok {
+			delete(c.parseFails, p)
+		}
+	}
+}
+
+// markSeen records a path as fully processed and clears its deferral/retry
+// bookkeeping.
+func (c *Collector) markSeen(path string) {
+	c.seenPaths[path] = struct{}{}
+	delete(c.deferred, path)
+	delete(c.parseFails, path)
 }
 
 // isLogUpload matches the two real NanoLink upload shapes: the gzipped ring
