@@ -1,9 +1,12 @@
 rules:
-  - module: FM
-    match: "ACS .*124\\.93\\.160\\.157.*unreachable|connect.*124\\.93\\.160\\.157"
+  # Real ACS-failure lines live in TR69 (not FM); the vendor IP no longer
+  # gates the match — IP-agnostic on module+text (keep in lockstep with
+  # rules.DefaultEngine()).
+  - module: TR69
+    match: "ACS (Connect Status = 2|connect failed|Disconnect with error)"
     event_type: vendor_acs_unreachable
     severity: major
-    message: "Hardcoded vendor ACS unreachable"
+    message: "Vendor ACS unreachable"
   - module: TR69
     match: "RPC Unknown received from ACS"
     event_type: atc_fault_loop
@@ -15,10 +18,20 @@ rules:
     severity: info
     message: "FTP upload succeeded"
   - module: FILE_TRANS
+    match: "curl code=\\(7\\)"
+    event_type: ftp_conn_fail
+    severity: major
+    message: "FTP connection failed"
+  - module: FILE_TRANS
     match: "curl code=\\(25\\)"
     event_type: ftp_upload_path_reject
     severity: minor
     message: "FTP upload path rejected"
+  - module: FILE_TRANS
+    match: "curl code=\\(28\\)"
+    event_type: ftp_upload_timeout
+    severity: major
+    message: "FTP upload timed out"
   - module: FILE_TRANS
     match: "curl code=\\(67\\)"
     event_type: ftp_auth_fail
