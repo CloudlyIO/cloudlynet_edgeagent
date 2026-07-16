@@ -14,8 +14,7 @@
 package main
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	_ "embed"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -23,13 +22,17 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"cloudlynet_edgeagent/testsuite/loggen"
 )
 
 type state struct {
@@ -42,37 +45,79 @@ type state struct {
 	snapshots      int
 	snapshotParams map[string]any
 	acks           map[string]string
+	// typedEvents/sawCanonicalTypedEvent are the Health gate extension: proof
+	// that A+B actually landed (real-log lines classify to a typed event —
+	// never "unclassified" — keyed on the canonical id, never the bare OUI or
+	// "unknown").
+	typedEvents            map[string]struct{}
+	sawCanonicalTypedEvent bool
 }
 
 const managedSnapshotParamCount = 24
 
-const (
-	deviceOUI          = "8C1F64"
-	deviceProductClass = "ENB-N03002-B3"
-	deviceSerial       = "2205600282"
-	deviceCWMPID       = "8C1F64-ENB%2DN03002%2DB3-2205600282" // canonical (%2D-encoded) id
+// Device identity is config-driven (nanolinkConfig.Identity) — these vars are
+// set once in main() before any goroutine starts, then read everywhere the
+// old hardcoded consts used to be.
+var (
+	deviceOUI          string
+	deviceProductClass string
+	deviceSerial       string
+	deviceCWMPID       string // canonical (%2D-encoded) id, derived from identity
 )
+
+//go:embed fixtures/real_sample.log
+var realSampleFixture string
+
+// sampleLines returns the redacted real-log corpus lines loggen replays
+// alongside its synthetic per-module filler (decision D3: both).
+func sampleLines() []string {
+	var out []string
+	for _, l := range strings.Split(realSampleFixture, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
 
 func main() {
 	mode := strings.ToLower(strings.TrimSpace(env("TESTSUITE_MODE", "full")))
-	st := &state{acks: map[string]string{}, snapshotParams: map[string]any{}}
-	dev := newDevice()
+
+	cfg, err := loadNanolinkConfig(env("NANOLINK_CONF", "conf/nanolink.conf"))
+	if err != nil {
+		log.Fatalf("nanolink config load failed: %v", err)
+	}
+	cfg = cfg.withEnvOverrides()
+	deviceOUI, deviceProductClass, deviceSerial = cfg.Identity.OUI, cfg.Identity.ProductClass, cfg.Identity.Serial
+	deviceCWMPID = canonicalID(deviceOUI, deviceProductClass, deviceSerial)
+
+	m, err := loadManifest()
+	if err != nil {
+		log.Fatalf("nanolink manifest load failed: %v", err)
+	}
+
+	st := &state{acks: map[string]string{}, snapshotParams: map[string]any{}, typedEvents: map[string]struct{}{}}
+	dev := newDevice(m)
 
 	ftpDir := env("FTP_DIR", "/ftp")
-	if err := os.MkdirAll(ftpDir, 0o755); err == nil {
-		go func() {
-			time.Sleep(3 * time.Second)
-			if err := writeArchive(path.Join(ftpDir, deviceCWMPID+"_logs.tgz")); err != nil {
-				log.Printf("fixture archive failed: %v", err)
-			}
-		}()
+	_ = os.MkdirAll(ftpDir, 0o755)
+	ftpCfg := ftpUploadConfig{
+		host:     cfg.FTP.Host,
+		user:     cfg.FTP.User,
+		pass:     cfg.FTP.Pass,
+		interval: cfg.FTP.UploadInterval,
+		scenario: loggen.Scenario(cfg.Scenario),
 	}
 
 	// The mock device dials the agent's ACS. It retries until the agent is up.
 	agentURL := env("AGENT_CWMP_URL", "http://cloudlynet-edgeagent:7547/")
 	dialNow := make(chan struct{}, 1)
 	go runConnRequestListener(":30005", dialNow)
-	go runDeviceLoop(agentURL, dev, dialNow)
+	go runDeviceLoop(agentURL, dev, dialNow, m)
+
+	// The device Informs (onboards) before its first log upload — the agent's
+	// device-id resolution depends on cwmp_devices being populated first.
+	go runFTPUploadLoop(dev, ftpCfg)
 
 	if mode == "acsftp" || mode == "acs" {
 		log.Printf("mock cwmp-device+ftp health listening on :9000 (platform mock disabled); dialing agent at %s", agentURL)
@@ -90,17 +135,25 @@ func cloudMux(st *state) http.Handler {
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		ok := st.registered > 0 && st.heartbeats > 0 && st.telemetry > 0 && st.events > 0 &&
-			st.failures > 0 && st.snapshots > 0 && len(st.snapshotParams) == managedSnapshotParamCount && len(st.acks) >= 3
+			st.failures > 0 && st.snapshots > 0 && len(st.snapshotParams) == managedSnapshotParamCount && len(st.acks) >= 3 &&
+			len(st.typedEvents) > 0 && st.sawCanonicalTypedEvent
+		typed := make([]string, 0, len(st.typedEvents))
+		for t := range st.typedEvents {
+			typed = append(typed, t)
+		}
+		sort.Strings(typed)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":              ok,
-			"registered":      st.registered,
-			"heartbeats":      st.heartbeats,
-			"telemetry":       st.telemetry,
-			"events":          st.events,
-			"failures":        st.failures,
-			"snapshots":       st.snapshots,
-			"snapshot_params": len(st.snapshotParams),
-			"acks":            st.acks,
+			"ok":                       ok,
+			"registered":               st.registered,
+			"heartbeats":               st.heartbeats,
+			"telemetry":                st.telemetry,
+			"events":                   st.events,
+			"failures":                 st.failures,
+			"snapshots":                st.snapshots,
+			"snapshot_params":          len(st.snapshotParams),
+			"acks":                     st.acks,
+			"typed_events":             typed,
+			"typed_event_on_canonical": st.sawCanonicalTypedEvent,
 		})
 	})
 	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, r *http.Request) {
@@ -126,12 +179,24 @@ func cloudMux(st *state) http.Handler {
 		}
 		st.mu.Unlock()
 		var body struct {
-			Events []any `json:"events"`
+			Events []struct {
+				CWMPID    string `json:"cwmp_id"`
+				EventType string `json:"event_type"`
+			} `json:"events"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		st.mu.Lock()
 		st.telemetry++
 		st.events += len(body.Events)
+		for _, e := range body.Events {
+			if e.EventType == "" || e.EventType == "unclassified" {
+				continue
+			}
+			st.typedEvents[e.EventType] = struct{}{}
+			if e.CWMPID == deviceCWMPID {
+				st.sawCanonicalTypedEvent = true
+			}
+		}
 		st.mu.Unlock()
 		envelope(w, map[string]any{"metrics": 1, "events": 1})
 	})
@@ -231,42 +296,20 @@ type device struct {
 	informsSent int64
 }
 
-func newDevice() *device {
-	return &device{params: map[string]string{
-		// Identity + liveness/IP (cached on Inform, feeds inventory).
-		"Device.DeviceInfo.SerialNumber":                         deviceSerial,
-		"Device.DeviceInfo.ProductClass":                         deviceProductClass,
-		"Device.DeviceInfo.SoftwareVersion":                      "1.0.0",
-		"Device.LAN.IPAddress":                                   "192.168.8.248",
-		"Device.WAN.IPAddress":                                   "10.0.0.10",
-		"Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus": "1",
-		"Device.Services.FAPService.1.FAPControl.LTE.OpState":    "1",
-		// The 24 managed snapshot parameters.
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.PhyCellID":                              "449",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNDL":                               "1850",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNUL":                               "19850",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.FreqBandIndicator":                      "3",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.DLBandwidth":                            "100",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ULBandwidth":                            "100",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower":                   "-10",
-		"Device.Services.FAPService.1.Capabilities.MaxTxPower":                                      "21",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pa":                              "0",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pb":                              "0",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXEnabled":                        "1",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.OnDurationTimer":                   "40",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXInactivityTimer":                "1920",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.LongDRXCycle":                      "128",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.ShortDRXCycle":                     "128",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.X_8C1F64_PCH.DefaultPagingCycle":       "rf128",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.QRxLevMinSIB1": "-62",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.SIntraSearch":  "21",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A2ThresholdRSRP":   "50",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A1ThresholdRSRP":   "60",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.Hysteresis":        "2",
-		"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.TimeToTrigger":     "40",
-		"Device.ManagementServer.PeriodicInformInterval":                                            "300",
-		"Device.X_8C1F64_DebugMgmt.Upload.AutonomousTransferCompletePolicy":                         "Always",
-	}}
+// newDevice seeds the mock device's entire param store from the NanoLink
+// manifest (20,260 params) instead of the ~33 hand-picked values it used to
+// hardcode (finding D) — a GetParameterValues for any managed path now
+// returns a realistic value + xsi:type (see manifest.go's xsdType). Only
+// fields the manifest doesn't carry at all (test-harness IPs) are overridden;
+// identity stays in lockstep with the active config (main()'s deviceOUI/
+// deviceProductClass/deviceSerial), never the manifest's own snapshot values.
+func newDevice(m *manifest) *device {
+	params := m.seedParams()
+	params["Device.LAN.IPAddress"] = "192.168.8.248"
+	params["Device.WAN.IPAddress"] = "10.0.0.10"
+	params["Device.DeviceInfo.SerialNumber"] = deviceSerial
+	params["Device.DeviceInfo.ProductClass"] = deviceProductClass
+	return &device{params: params}
 }
 
 func (d *device) get(paths []string) [][2]string {
@@ -309,12 +352,12 @@ func runConnRequestListener(addr string, dialNow chan<- struct{}) {
 	}
 }
 
-func runDeviceLoop(agentURL string, dev *device, dialNow <-chan struct{}) {
+func runDeviceLoop(agentURL string, dev *device, dialNow <-chan struct{}, m *manifest) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		runSession(client, agentURL, dev)
+		runSession(client, agentURL, dev, m)
 		select {
 		case <-ticker.C:
 		case <-dialNow:
@@ -322,14 +365,20 @@ func runDeviceLoop(agentURL string, dev *device, dialNow <-chan struct{}) {
 	}
 }
 
-// runSession performs one CWMP session against the agent: Inform -> ATC -> drain
-// the ACS's queued tasks -> 204.
-func runSession(client *http.Client, agentURL string, dev *device) {
+// runSession performs one CWMP session against the agent: Inform -> GetRPCMethods
+// -> TransferComplete -> ATC -> drain the ACS's queued tasks -> 204. GetRPCMethods
+// and TransferComplete are device-initiated notifications the agent's CWMP
+// session already answers (session.go); sending them exercises that surface
+// (ST-4 "harden") without disturbing the task-queue drain loop below.
+func runSession(client *http.Client, agentURL string, dev *device, m *manifest) {
 	msgID := nextMsgID()
-	if _, ok := post(client, agentURL, informEnvelope(msgID)); !ok {
+	if _, ok := post(client, agentURL, informEnvelope(msgID, dev)); !ok {
 		return // agent not up yet; retry next tick
 	}
 	dev.incInform()
+
+	post(client, agentURL, getRPCMethodsEnvelope(msgID))
+	post(client, agentURL, transferCompleteEnvelope(msgID))
 
 	atc, _ := post(client, agentURL, atcEnvelope(msgID))
 	if strings.Contains(strings.ToLower(atc), "fault") {
@@ -344,12 +393,16 @@ func runSession(client *http.Client, agentURL string, dev *device) {
 		req := parseACSRequest(body)
 		switch req.kind {
 		case "gpv":
-			post(client, agentURL, gpvResponseEnvelope(msgID, dev.get(req.paths)))
+			post(client, agentURL, gpvResponseEnvelope(msgID, dev.get(req.paths), m))
 		case "spv":
 			dev.set(req.writes)
 			post(client, agentURL, spvResponseEnvelope(msgID))
 		case "gpn":
-			post(client, agentURL, gpnResponseEnvelope(msgID, dev))
+			prefix := ""
+			if len(req.paths) > 0 {
+				prefix = req.paths[0]
+			}
+			post(client, agentURL, gpnResponseEnvelope(msgID, dev, prefix))
 		case "reboot":
 			post(client, agentURL, rebootResponseEnvelope(msgID))
 		default:
@@ -410,7 +463,7 @@ func parseACSRequest(body string) acsRequest {
 		}
 		return acsRequest{kind: "spv", writes: writes}
 	case env.Body.GetParameterNames != nil:
-		return acsRequest{kind: "gpn"}
+		return acsRequest{kind: "gpn", paths: []string{env.Body.GetParameterNames.Path}}
 	case env.Body.Reboot != nil:
 		return acsRequest{kind: "reboot"}
 	}
@@ -430,7 +483,7 @@ func wrap(msgID, inner string) string {
 	return fmt.Sprintf(soapOpen, msgID) + inner + soapClose
 }
 
-func informEnvelope(msgID string) string {
+func informEnvelope(msgID string, dev *device) string {
 	informParams := []string{
 		"Device.DeviceInfo.SoftwareVersion",
 		"Device.LAN.IPAddress",
@@ -438,10 +491,10 @@ func informEnvelope(msgID string) string {
 		"Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus",
 		"Device.Services.FAPService.1.FAPControl.LTE.OpState",
 	}
+	pairs := dev.get(informParams)
 	var pl strings.Builder
-	seed := newDevice()
-	for _, p := range informParams {
-		fmt.Fprintf(&pl, `<ParameterValueStruct><Name>%s</Name><Value xsi:type="xsd:string">%s</Value></ParameterValueStruct>`, p, seed.params[p])
+	for _, pv := range pairs {
+		fmt.Fprintf(&pl, `<ParameterValueStruct><Name>%s</Name><Value xsi:type="xsd:string">%s</Value></ParameterValueStruct>`, pv[0], pv[1])
 	}
 	inner := fmt.Sprintf(`<cwmp:Inform>`+
 		`<DeviceID><Manufacturer>NybSys</Manufacturer><OUI>%s</OUI><ProductClass>%s</ProductClass><SerialNumber>%s</SerialNumber></DeviceID>`+
@@ -449,7 +502,28 @@ func informEnvelope(msgID string) string {
 		`<MaxEnvelopes>1</MaxEnvelopes><CurrentTime>%s</CurrentTime><RetryCount>0</RetryCount>`+
 		`<ParameterList soap:arrayType="cwmp:ParameterValueStruct[%d]">%s</ParameterList>`+
 		`</cwmp:Inform>`,
-		deviceOUI, deviceProductClass, deviceSerial, time.Now().UTC().Format(time.RFC3339), len(informParams), pl.String())
+		deviceOUI, deviceProductClass, deviceSerial, time.Now().UTC().Format(time.RFC3339), len(pairs), pl.String())
+	return wrap(msgID, inner)
+}
+
+// getRPCMethodsEnvelope is a device-initiated notification (CPE -> ACS); the
+// agent's onGetRPCMethods (session.go) answers with its supported method list.
+func getRPCMethodsEnvelope(msgID string) string {
+	return wrap(msgID, `<cwmp:GetRPCMethods></cwmp:GetRPCMethods>`)
+}
+
+// transferCompleteEnvelope is the CPE's notification that an ACS-commanded
+// transfer finished; the agent's onTransferComplete (session.go) answers with
+// an empty TransferCompleteResponse. Distinct from AutonomousTransferComplete
+// (atcEnvelope), which is for transfers the device initiated on its own.
+func transferCompleteEnvelope(msgID string) string {
+	now := time.Now().UTC().Format(time.RFC3339)
+	inner := `<cwmp:TransferComplete>` +
+		`<CommandKey></CommandKey>` +
+		`<FaultStruct><FaultCode>0</FaultCode><FaultString></FaultString></FaultStruct>` +
+		`<StartTime>` + now + `</StartTime>` +
+		`<CompleteTime>` + now + `</CompleteTime>` +
+		`</cwmp:TransferComplete>`
 	return wrap(msgID, inner)
 }
 
@@ -465,10 +539,13 @@ func atcEnvelope(msgID string) string {
 	return wrap(msgID, inner)
 }
 
-func gpvResponseEnvelope(msgID string, pairs [][2]string) string {
+// gpvResponseEnvelope answers a GetParameterValues with each path's manifest
+// xsi:type (finding D: was a blanket xsd:string for every path regardless of
+// its real type).
+func gpvResponseEnvelope(msgID string, pairs [][2]string, m *manifest) string {
 	var pl strings.Builder
 	for _, p := range pairs {
-		fmt.Fprintf(&pl, `<ParameterValueStruct><Name>%s</Name><Value xsi:type="xsd:string">%s</Value></ParameterValueStruct>`, p[0], xmlEscape(p[1]))
+		fmt.Fprintf(&pl, `<ParameterValueStruct><Name>%s</Name><Value xsi:type="%s">%s</Value></ParameterValueStruct>`, p[0], m.xsdType(p[0]), xmlEscape(p[1]))
 	}
 	inner := fmt.Sprintf(`<cwmp:GetParameterValuesResponse><ParameterList soap:arrayType="cwmp:ParameterValueStruct[%d]">%s</ParameterList></cwmp:GetParameterValuesResponse>`, len(pairs), pl.String())
 	return wrap(msgID, inner)
@@ -478,9 +555,13 @@ func spvResponseEnvelope(msgID string) string {
 	return wrap(msgID, `<cwmp:SetParameterValuesResponse><Status>0</Status></cwmp:SetParameterValuesResponse>`)
 }
 
-// gpnResponseEnvelope answers the first-contact writability walk. The managed
-// snapshot paths are writable; identity/status paths are not.
-func gpnResponseEnvelope(msgID string, dev *device) string {
+// gpnResponseEnvelope answers the first-contact writability walk, scoped to the
+// requested ParameterPath (CWMP GetParameterNames semantics — the old stub
+// ignored it and dumped the whole store). The managed snapshot paths are
+// writable; identity/status paths are not. The agent walks "Device." (root,
+// see session.go), so this legitimately returns the full 20,260-param tree —
+// the agent's 16 MB request cap (server.go) is sized for exactly that.
+func gpnResponseEnvelope(msgID string, dev *device, prefix string) string {
 	writable := map[string]bool{
 		"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower": true,
 		"Device.ManagementServer.PeriodicInformInterval":                          true,
@@ -488,6 +569,9 @@ func gpnResponseEnvelope(msgID string, dev *device) string {
 	dev.mu.Lock()
 	names := make([]string, 0, len(dev.params))
 	for p := range dev.params {
+		if prefix != "" && !strings.HasPrefix(p, prefix) {
+			continue
+		}
 		names = append(names, p)
 	}
 	dev.mu.Unlock()
@@ -536,28 +620,99 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func writeArchive(target string) error {
-	f, err := os.Create(target)
+// ftpUploadConfig is the mock device's FTP transport, mirroring the real
+// NanoLink's curl -u <user>:<pass> ftp://<host>/ upload, plus the scenario
+// that drives both the generated log content and (for the self-triggering
+// scenarios) the upload path/credentials.
+type ftpUploadConfig struct {
+	host     string
+	user     string
+	pass     string
+	interval time.Duration
+	scenario loggen.Scenario
+}
+
+// runFTPUploadLoop waits for the device to Inform at least once (the agent's
+// device-id resolution depends on cwmp_devices being populated first), then
+// curl-uploads a real-shaped ring archive + bare Devicelog (ST-2) on the
+// configured cadence, matching the real device's ~60s cycle.
+func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
+	for dev.informs() == 0 {
+		time.Sleep(250 * time.Millisecond)
+	}
+	corpus := sampleLines()
+	upload := func() {
+		genCfg := loggen.Config{
+			OUI: deviceOUI, Serial: deviceSerial, ProductClass: deviceProductClass,
+			PowerOnAt: time.Now().UTC(), Scenario: cfg.scenario,
+		}
+		archive, deviceLog, err := loggen.Generate(genCfg, corpus)
+		if err != nil {
+			log.Printf("log generation failed: %v", err)
+			return
+		}
+
+		// The content-carrying upload ALWAYS targets the FTP root with the
+		// configured creds, so the scenario's staged log line reliably reaches
+		// the agent — this is what /health's typed-event gate asserts. If this
+		// upload instead targeted the scenario's broken path/creds, the bytes
+		// carrying the fault line would never arrive (the point of the fault),
+		// making the typed-event assertion hollow for exactly the two
+		// scenarios meant to prove it.
+		if err := curlUpload(cfg.host, cfg.user, cfg.pass, archive, "/"+genCfg.ArchiveName()); err != nil {
+			log.Printf("ftp archive upload failed: %v", err)
+		}
+		if err := curlUpload(cfg.host, cfg.user, cfg.pass, deviceLog, "/"+genCfg.DeviceLogName()); err != nil {
+			log.Printf("ftp devicelog upload failed: %v", err)
+		}
+
+		// Self-triggering scenarios ALSO fire a separate probe upload against
+		// the broken path/creds — proves the FTP hop itself faithfully
+		// reproduces the real curl failure code (finding C), independent of
+		// content delivery. Expected to fail; only logged for visibility.
+		switch cfg.scenario {
+		case loggen.ScenarioFTPPathReject:
+			if err := curlUpload(cfg.host, cfg.user, cfg.pass, archive, "/uploads/"+genCfg.ArchiveName()); err != nil {
+				log.Printf("ftp-path-reject probe (expected failure, proves curl(25)): %v", err)
+			}
+		case loggen.ScenarioFTPAuthFail:
+			if err := curlUpload(cfg.host, cfg.user, cfg.pass+"-wrong", archive, "/"+genCfg.ArchiveName()); err != nil {
+				log.Printf("ftp-auth-fail probe (expected failure, proves curl(67)): %v", err)
+			}
+		}
+	}
+	upload()
+	ticker := time.NewTicker(cfg.interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		upload()
+	}
+}
+
+// curlUpload writes data to a scratch file and shells out to curl (installed
+// in the testsuite image) rather than a Go FTP client — faithful to the real
+// device, whose logs literally show
+// "curl -vvv -T <file> ... -u nybsys:*** -g 'ftp://192.168.8.100/'".
+func curlUpload(host, user, pass string, data []byte, remotePath string) error {
+	tmp, err := os.CreateTemp("", "nanolink-upload-*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	gz := gzip.NewWriter(f)
-	defer gz.Close()
-	tw := tar.NewWriter(gz)
-	defer tw.Close()
-	files := map[string]string{
-		"TR69.log":       "RPC Unknown received from ACS\n",
-		"FILE_TRANS.log": "File upload success, curl code=(0)\n",
-		"FM.log":         "device reboot observed\n",
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
 	}
-	for name, body := range files {
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}); err != nil {
-			return err
-		}
-		if _, err := tw.Write([]byte(body)); err != nil {
-			return err
-		}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("ftp://%s%s", host, remotePath)
+	cmd := exec.Command("curl", "-sS", "-T", tmpPath, "-u", user+":"+pass, "--connect-timeout", "5", url)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
