@@ -42,10 +42,14 @@ func Load(path string) (*Engine, error) {
 
 func DefaultEngine() *Engine {
 	e, _ := compile([]Rule{
-		{Module: "FM", Match: `ACS .*124\.93\.160\.157.*unreachable|connect.*124\.93\.160\.157`, EventType: "vendor_acs_unreachable", Severity: "major", Message: "Hardcoded vendor ACS unreachable"},
+		// Real ACS-failure lines live in TR69 (not FM); the vendor IP no longer
+		// gates the match — IP-agnostic on module+text (see engine.go doc + plan).
+		{Module: "TR69", Match: `ACS (Connect Status = 2|connect failed|Disconnect with error)`, EventType: "vendor_acs_unreachable", Severity: "major", Message: "Vendor ACS unreachable"},
 		{Module: "TR69", Match: `RPC Unknown received from ACS`, EventType: "atc_fault_loop", Severity: "major", Message: "ACS returned Fault to ATC"},
 		{Module: "FILE_TRANS", Match: `File upload success, curl code=\(0\)`, EventType: "ftp_upload_ok", Severity: "info", Message: "FTP upload succeeded"},
+		{Module: "FILE_TRANS", Match: `curl code=\(7\)`, EventType: "ftp_conn_fail", Severity: "major", Message: "FTP connection failed"},
 		{Module: "FILE_TRANS", Match: `curl code=\(25\)`, EventType: "ftp_upload_path_reject", Severity: "minor", Message: "FTP upload path rejected"},
+		{Module: "FILE_TRANS", Match: `curl code=\(28\)`, EventType: "ftp_upload_timeout", Severity: "major", Message: "FTP upload timed out"},
 		{Module: "FILE_TRANS", Match: `curl code=\(67\)`, EventType: "ftp_auth_fail", Severity: "major", Message: "FTP authentication failed"},
 		{Module: "FM", Match: `(?i)reboot|restart`, EventType: "device_reboot", Severity: "critical", Message: "Device reboot detected"},
 	})
@@ -63,7 +67,24 @@ func compile(in []Rule) (*Engine, error) {
 	return &Engine{rules: in}, nil
 }
 
-func (e *Engine) Apply(module string, lines []string, deviceHint string) []cloud.EventItem {
+// moduleTagRe extracts the inline "[MODULE]" tag real NanoLink log lines
+// carry (e.g. "... [FILE_TRANS] File upload success ..."). Real logs are
+// numbered ring files (1…10/index/max) with all modules interleaved — the
+// module lives per LINE, not in the (meaningless) entry filename.
+var moduleTagRe = regexp.MustCompile(`\[([A-Za-z0-9_]+)\]`)
+
+// moduleFromLine returns the first inline "[MODULE]" tag in line, or "" if the
+// line carries none (a genuinely untagged line only ever hits the alarmy()
+// fallback — no rule declares an empty Module).
+func moduleFromLine(line string) string {
+	m := moduleTagRe.FindStringSubmatch(line)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+func (e *Engine) Apply(lines []string, deviceHint string) []cloud.EventItem {
 	now := time.Now().UTC().Format(time.RFC3339)
 	var out []cloud.EventItem
 	for _, line := range lines {
@@ -71,6 +92,7 @@ func (e *Engine) Apply(module string, lines []string, deviceHint string) []cloud
 		if line == "" {
 			continue
 		}
+		module := moduleFromLine(line)
 		matched := false
 		for _, r := range e.rules {
 			if !strings.EqualFold(r.Module, module) || !r.re.MatchString(line) {
