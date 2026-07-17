@@ -164,23 +164,29 @@ Run one:
 ```sh
 make e2e-scenario SCENARIO=ftp-auth-fail
 # equivalent raw form:
-EDGEAGENT_TESTSUITE_SCENARIO=ftp-auth-fail docker compose up -d --build
+EDGEAGENT_TESTSUITE_SCENARIO=ftp-auth-fail docker compose -f docker-compose.test.yml up -d --build
 ```
 
-| `SCENARIO=` | Expected typed event | Real transport probe |
-|---|---|---|
-| `happy` | `ftp_upload_ok` | — (this is the working path) |
-| `ftp-path-reject` | `ftp_upload_path_reject` | uploads to write-protected `/uploads` → `curl (25)` (STOR denied) |
-| `ftp-auth-fail` | `ftp_auth_fail` | uploads with a wrong password → `curl (67)` (login denied) |
-| `ftp-conn-fail` | `ftp_conn_fail` | — (content-only; staged `curl (7)` line) |
-| `ftp-timeout` | `ftp_upload_timeout` | — (content-only; staged `curl (28)` line) |
-| `atc-fault` | `atc_fault_loop` | — (content-only) |
-| `reboot` | `device_reboot` | — (content-only) |
+| `SCENARIO=` | Represents (real-world condition) | Typed event | Live transport probe |
+|---|---|---|---|
+| `happy` | log upload succeeds | `ftp_upload_ok` | — (this *is* the working path) |
+| `ftp-path-reject` | server refuses the write — misconfigured/read-only upload path (the **dominant** real failure) | `ftp_upload_path_reject` | yes → real `curl (25)` (STOR denied at `/uploads`) |
+| `ftp-auth-fail` | wrong / rotated FTP credentials | `ftp_auth_fail` | yes → real `curl (67)` (login denied) |
+| `ftp-conn-fail` | FTP server down / unreachable | `ftp_conn_fail` | — (staged `curl (7)`) |
+| `ftp-timeout` | slow / unresponsive server, congested link | `ftp_upload_timeout` | — (staged `curl (28)`) |
+| `atc-fault` | the ACS breaks the CWMP session — the bug the in-agent-CWMP rework fixed (**regression guard**) | `atc_fault_loop` | — |
+| `reboot` | a critical fault auto-reboots the device (e.g. S1-setup max-retry) | `device_reboot` | — |
 
-The content-carrying upload always targets the FTP root with working credentials, so the staged
-event reaches the agent regardless of scenario; the probe (path-reject / auth-fail) is a separate
-best-effort upload whose failure code is visible in the testsuite logs. `s1-failure` is intentionally
-not a scenario — no typed rule exists for it yet.
+The content-carrying upload always targets the FTP root with working credentials, so the staged event
+reaches the agent regardless of scenario; the probe (path-reject / auth-fail) is a separate
+best-effort upload whose real `curl` code shows in the testsuite logs.
+
+**Why these seven?** Each is a fault the NanoLink actually emits (validated against the captured logs)
+**and** one the agent has a typed rule for — so a scenario drives exactly one rule end-to-end. The five
+FTP scenarios are the five `curl` outcomes the device's log-upload really produces (`0/7/25/28/67`);
+`atc-fault` guards the CWMP session-killer the rework fixed; `reboot` is the critical device event. A
+fault with no rule (e.g. S1-setup failure) is **not** a scenario — it would only land as generic
+`unclassified`. New rule → new scenario.
 
 ## Configuration
 
@@ -221,6 +227,9 @@ Content is a small **redacted real sample** (`fixtures/real_sample.log`) plus **
 filler** and the scenario's fault line. Fidelity scope: `continuouslogging` + `Devicelog` only, ring
 layout without live rotation, single device. Real FTP credentials are redacted in the fixture —
 **never commit real credentials.**
+
+**Full detail — the line format, the two artifacts, the per-scenario staged lines, and the fixture:
+[`loggen/README.md`](loggen/README.md).**
 
 ## Manifest-seeded param store
 
