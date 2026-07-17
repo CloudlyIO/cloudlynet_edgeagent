@@ -12,7 +12,7 @@ import (
 
 // nanolinkConfig is the single .conf driving the mock NanoLink: identity,
 // FTP transport, and the named scenario. Env vars (FTP_HOST/FTP_USER/FTP_PASS,
-// NANOLINK_SCENARIO — already wired in docker-compose.yml) override the file,
+// NANOLINK_SCENARIO — already wired in docker-compose.test.yml) override the file,
 // matching this repo's existing env-first convention (see env()).
 type nanolinkConfig struct {
 	Identity struct {
@@ -59,7 +59,7 @@ func loadNanolinkConfig(path string) (nanolinkConfig, error) {
 	return cfg, nil
 }
 
-// withEnvOverrides applies the same env-var knobs docker-compose.yml already
+// withEnvOverrides applies the same env-var knobs docker-compose.test.yml already
 // wires (FTP_HOST/FTP_USER/FTP_PASS/NANOLINK_SCENARIO), taking precedence over
 // the .conf — consistent with this file's env-first convention elsewhere.
 func (c nanolinkConfig) withEnvOverrides() nanolinkConfig {

@@ -17,6 +17,11 @@ GO_BUILD_ENV := CGO_ENABLED=0
 # Scenario for `make e2e-scenario` (full list in `make help`).
 SCENARIO ?= happy
 
+# The compose file is a local TEST/validation harness, not a production deploy
+# (production = scripts/install.sh + systemd). Exported so every `docker compose`
+# recipe + scripts/e2e.sh targets it without a bare `docker compose up` starting it.
+export COMPOSE_FILE := docker-compose.test.yml
+
 .DEFAULT_GOAL := help
 
 .PHONY: help build test test-suite vet fmt run clean install uninstall \

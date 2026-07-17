@@ -9,7 +9,7 @@ CloudlyNet Edge Agent is a Go TR-069 edge process for attaching RadioDevices to 
 ```text
 Makefile
 Dockerfile
-docker-compose.yml
+docker-compose.test.yml   # local functional-test / validation harness (NOT prod)
 config/
   agent.yaml          # docker/test config (embeds a dev token)
   rules.yaml
@@ -106,10 +106,14 @@ data, and the user).
 
 ## Local Functional Test
 
+The stack lives in `docker-compose.test.yml` (a **test/validation harness**, not a production
+deploy — production is `scripts/install.sh` + systemd). Easiest is `make e2e` (or `make e2e-all`);
+the raw form:
+
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.test.yml up -d --build
 curl http://localhost:9000/health
-docker compose down -v
+docker compose -f docker-compose.test.yml down -v
 ```
 
 The testsuite container mocks the CloudlyNet `/v1/agent/**` cloud on port `9000` **and plays a mock NanoLink CWMP device** that dials the agent's in-agent ACS at `:7547` (Inform → ATC → GPV/SPV/GPN/Reboot), plus a connection-request listener on `:30005`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, acked configure/query/reboot commands over CWMP, and delivered all 24 managed configuration paths — with the ATC session completing (no Fault).
@@ -121,10 +125,10 @@ Use `EDGEAGENT_TESTSUITE_MODE=acsftp` when CloudlyNet/NetAI is already deployed 
 ```bash
 EDGEAGENT_TESTSUITE_MODE=acsftp \
 CLOUDLYNET_ENROLLMENT_TOKEN='<enrollment-token>' \
-docker compose up -d --build cloudlynet-edgeagent-testsuite cloudlynet-edgeagent
+docker compose -f docker-compose.test.yml up -d --build cloudlynet-edgeagent-testsuite cloudlynet-edgeagent
 
 curl http://localhost:9000/health
-docker compose logs -f cloudlynet-edgeagent
+docker compose -f docker-compose.test.yml logs -f cloudlynet-edgeagent
 ```
 
 Production enrollment tokens should embed `https://netai.cloudly.io/`. If you are validating an

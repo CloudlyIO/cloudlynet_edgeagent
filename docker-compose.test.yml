@@ -1,3 +1,18 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL FUNCTIONAL-TEST / VALIDATION HARNESS — NOT a production deploy.
+#
+# Brings up the agent-under-test alongside its MOCKS (mock cloud + mock NanoLink
+# CPE, both in `…-testsuite`) and a REAL vsftpd, so `make e2e` / `make e2e-all`
+# can drive the agent end to end. The agent service below is wired to the mock
+# cloud (`:9000`) — this is NOT a way to run the agent for real.
+#
+# Production runs the agent as a systemd binary on the edge box via
+# `scripts/install.sh` (see `deploy/` + README → "Edge Device Install"); the real
+# box runs its own vsftpd. Nothing in this file runs in production.
+#
+# The `make` targets and `scripts/e2e.sh` point at this file via COMPOSE_FILE;
+# a bare `docker compose` needs `-f docker-compose.test.yml`.
+# ─────────────────────────────────────────────────────────────────────────────
 services:
   cloudlynet-edgeagent:
     build:

@@ -10,9 +10,10 @@
 #   scripts/e2e.sh --all --verbose     # per-check breakdown (also: VERBOSE=1)
 set -uo pipefail
 
-# Run against the root compose file regardless of the caller's CWD.
+# Run against the test-harness compose file regardless of the caller's CWD.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+export COMPOSE_FILE="$REPO_ROOT/docker-compose.test.yml"
 
 PORT="${EDGEAGENT_TESTSUITE_PORT:-9000}"
 MAX_POLLS=60   # x2s => up to ~120s per scenario
