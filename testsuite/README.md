@@ -95,6 +95,48 @@ that differs — and makes each run a distinct test — is **`expected_event`** 
 `snapshot_params`, `acks`, `typed_events`, `typed_event_on_canonical`, `expected_event`,
 `saw_expected_event`. (Always HTTP 200; `ok` is a body field.)
 
+## Coverage — what this verifies / what it does NOT
+
+Use this to judge whether the suite is sufficient for a given change. A green `make e2e-all`
+asserts, **every run**:
+
+- **Agent ↔ cloud lifecycle** — register + heartbeat + telemetry (incl. one forced failure →
+  outbox retry recovers).
+- **CWMP onboarding** — device `Inform` → agent resolves and stores the **canonical device id**.
+- **ATC handled without a SOAP Fault** — the session survives to the ACS's read/write turn (the
+  reason the CWMP rework exists).
+- **Full CPE RPC round-trip** — `GetRPCMethods` / `TransferComplete` / GPV / SPV / GPN / `Reboot`.
+- **Config snapshot** — the 24 managed params read via GPV and pushed to the cloud.
+- **Command loop** — 3 cloud commands (configure / query / reboot) applied over CWMP and acked.
+- **FTP log ingestion over a real vsftpd** (curl → ftpd → shared volume → `WatchFTP`), covering the
+  four ingestion fixes: module routed per-line from the inline `[MODULE]` tag; bare `Devicelog`
+  ingested; event keyed to the canonical device (not a phantom); rules classify curl `0/7/25/28/67`,
+  the TR-069 vendor-ACS-unreachable text, and the FM reboot alarm.
+- **Per-scenario signal** — each of the 7 fault lines classifies to its own typed event
+  (`saw_expected_event`).
+- **Two transport failures reproduced live over the wire** — `curl (25)` (STOR-denied `/uploads`)
+  and `curl (67)` (bad login).
+- **Content-derived dedup** — identical log lines collapse to one event.
+
+It does **NOT** cover (out of scope by design):
+
+- **Multiple devices / cells** — single device only.
+- **RAN/RF, E2 / A1 / O1, or KPI streams** — none; this exercises CWMP + FTP logs only.
+- **Adversarial/malformed CWMP** — well-formed happy-path session shapes only (no SOAP fuzzing,
+  oversized payloads, or auth attacks on `:7547`).
+- **`curl (7)` / `(28)` over the wire** — their rules are exercised via staged log content, but the
+  connection-failure / timeout transports are not actually induced live.
+- **Real cloud ingestion / Postgres dedup** — the cloud is a mock; dedup is asserted against its
+  in-memory set, not a real `ON CONFLICT(dedup_key)`.
+- **Cold-start deferral / not-yet-onboarded device** — unit-tested only; not exercised in
+  `docker-up` (the device always Informs before its first upload).
+- **Agent restart / buffer persistence / crash recovery**, and **performance / soak** — not driven.
+- **Real-box vsftpd parity** (passive range, real credentials) — see Real-box parity below.
+
+Operational caveat: over long runs each upload cycle writes a new `_PowerOn_<ts>_` archive and
+re-ingests, so `events` / disk / the collector's seen-path map grow with runtime — fine for the
+short functional runs this suite is for; the real device rotates in place.
+
 ## Commands
 
 | Command | What it does |
@@ -199,13 +241,3 @@ Before treating a laptop run as representative of the real edge box, confirm fro
 - The real `vsftpd.conf` passive port range and the FTP user/password.
 - The FTP-root watch directory (moot in this stack — the shared volume is the same data regardless of
   each container's mount path).
-
-## Known limitations (emulator, not agent bugs)
-
-- **Growth over long runs** — each upload cycle writes a new `_PowerOn_<ts>_` archive + Devicelog and
-  re-ingests, so `events`, disk, and the collector's seen-path map grow with runtime. Fine for the
-  short functional runs this suite is for.
-- **Alarm overlap** — alarm lines appear in both the ring and the Devicelog (realistic); the agent's
-  content-derived dedup key collapses them at the cloud.
-- **Cold-start deferral** is covered by unit tests, not exercised in `docker-up` (the device Informs
-  before its first upload, so device-id resolution always succeeds live).
