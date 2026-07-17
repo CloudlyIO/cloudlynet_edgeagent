@@ -49,6 +49,52 @@ make docker-logs                               # tail agent logs (optional)
 make docker-down                               # stop + remove (incl. the shared volume)
 ```
 
+## How the end-to-end test works
+
+Only the **agent is under test**; the testsuite mocks everything around it (see Architecture). A run
+drives the agent through the full device lifecycle, then asserts the result via the `/health` gate.
+
+**One run, end to end:**
+
+```
+ device Inform ─▶ agent stores the canonical device id                   [onboard]
+      ├─▶ AutonomousTransferComplete → agent answers EMPTY, never Fault   [CWMP session survives]
+      ├─▶ cloud sends 3 commands → agent applies over CWMP → acks         [command loop]
+      ├─▶ agent reads 24 managed params (GPV) → config snapshot           [snapshot == 24]
+      └─▶ device curl-uploads  ring.tgz + bare Devicelog
+             └▶ real vsftpd → shared volume → agent WatchFTP → parse:
+                  · module from the inline [MODULE] tag   · bare Devicelog ingested too
+                  · device = canonical id via the store   · rules classify the lines
+             └▶ typed events → telemetry (1st push force-failed → outbox retry) → cloud
+                  └▶ /health flips ok:true once every check below passes
+```
+
+**The gate — `ok` is one big AND:**
+
+```
+ ok =  registered>0 AND heartbeats>0 AND telemetry>0 AND events>0
+   AND failures>0                 (outbox retry exercised)
+   AND snapshots>0 AND snapshot_params==24
+   AND acks>=3                    (command loop worked)
+   AND typed_events not empty
+   AND typed_event_on_canonical   (event keyed to the real device, not a phantom)
+   AND saw_expected_event         (THIS scenario's own signal classified)   ← per-scenario check
+```
+
+`ok:true` collapses ~12 independent checks into one boolean. **Read the `/health` JSON only when `ok`
+is `false`** — the field that's `false` points at the stage that broke.
+
+**Why the runs look alike — and where to actually look:** the redacted real corpus
+(`fixtures/real_sample.log`) is replayed in every run and already carries curl `0/7/25/28/67` + an FM
+reboot + TR69 ACS lines, so the **same 8 `typed_events` fire in every scenario** (expected). The field
+that differs — and makes each run a distinct test — is **`expected_event`** (+ `saw_expected_event`).
+`atc-fault` is the tell: its event isn't in the corpus, so `atc_fault_loop` appears in `typed_events`
+*only* in that run. Per run, look at **`ok` + `expected_event`**; ignore the repetitive list.
+
+`/health` fields: `ok`, `registered`, `heartbeats`, `telemetry`, `events`, `failures`, `snapshots`,
+`snapshot_params`, `acks`, `typed_events`, `typed_event_on_canonical`, `expected_event`,
+`saw_expected_event`. (Always HTTP 200; `ok` is a body field.)
+
 ## Commands
 
 | Command | What it does |
@@ -119,15 +165,6 @@ Compose-level overrides (all optional, with defaults):
 | `EDGEAGENT_TESTSUITE_MODE` | `full` | `full` / `acs` / `acsftp` (see Debug modes) |
 | `EDGEAGENT_CWMP_PORT` | `7547` | host port for the agent's CWMP ACS |
 | `FTP_USER` / `FTP_PASS` | `nybsys` / `nybsys-local-test` | vsftpd + device credentials |
-
-## Reading `/health`
-
-`GET :9000/health` (always HTTP 200; `ok` is a body field). `"ok": true` requires **all** of:
-`registered`, `heartbeats`, `telemetry`, `events`, `failures`, `snapshots` > 0; `snapshot_params == 24`;
-`acks` ≥ 3; at least one entry in `typed_events`; `typed_event_on_canonical: true` (a real-log event
-keyed on the canonical device id, not a bare OUI or `unknown`); and `saw_expected_event: true` (the
-selected scenario's `expected_event` classified). The response also echoes `expected_event` and the
-sorted `typed_events` list for inspection.
 
 ## Log generation
 
