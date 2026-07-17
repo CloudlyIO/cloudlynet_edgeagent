@@ -72,11 +72,11 @@ sync-manifest: ## Copy the in-repo NanoLink manifest into testsuite's embedded a
 	cp $(GOAGENT_DIR)/internal/cwmp/assets/nanolink_param_manifest.json testsuite/assets/nanolink_param_manifest.json
 	@echo "synced testsuite/assets/nanolink_param_manifest.json from $(GOAGENT_DIR)/internal/cwmp/assets/"
 
-e2e: ## End-to-end test: happy scenario (stack up -> assert /health ok -> tear down)
-	./scripts/e2e.sh happy
+e2e: ## End-to-end test: happy scenario (up -> assert /health ok -> down; add VERBOSE=1 for per-check detail)
+	@./scripts/e2e.sh happy $(if $(filter 1,$(VERBOSE)),--verbose)
 
-e2e-scenario: ## Run one scenario e2e (SCENARIO=happy|ftp-path-reject|ftp-auth-fail|ftp-conn-fail|ftp-timeout|atc-fault|reboot)
-	./scripts/e2e.sh $(SCENARIO)
+e2e-scenario: ## Run one scenario e2e (SCENARIO=happy|ftp-path-reject|ftp-auth-fail|ftp-conn-fail|ftp-timeout|atc-fault|reboot; VERBOSE=1 for detail)
+	@./scripts/e2e.sh $(SCENARIO) $(if $(filter 1,$(VERBOSE)),--verbose)
 
-e2e-all: ## End-to-end sweep across all 7 scenarios (non-zero exit if any fail)
-	./scripts/e2e.sh --all
+e2e-all: ## End-to-end sweep across all 7 scenarios (VERBOSE=1 for per-check detail; non-zero exit if any fail)
+	@./scripts/e2e.sh --all $(if $(filter 1,$(VERBOSE)),--verbose)
