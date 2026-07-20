@@ -20,8 +20,6 @@ services:
       dockerfile: Dockerfile
     container_name: cloudlynet_edgeagent
     restart: unless-stopped
-    env_file:
-      - ./.env.example
     environment:
       CLOUDLYNET_ENROLLMENT_TOKEN: ${CLOUDLYNET_ENROLLMENT_TOKEN:-eyJ2IjoxLCJ0ZW5hbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMzAyOS0wMDAwMDAwMDAwMDEiLCJlZGdlX2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIiwiYmFzZV91cmwiOiJodHRwOi8vY2xvdWRseW5ldC1lZGdlYWdlbnQtdGVzdHN1aXRlOjkwMDAiLCJhcGlfa2V5IjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExLmRldnNlY3JldCJ9}
       CLOUDLYNET_BASE_URL: ${CLOUDLYNET_BASE_URL:-http://cloudlynet-edgeagent-testsuite:9000}
