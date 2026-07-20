@@ -29,12 +29,12 @@ goagent/
   internal/rules
   internal/collector
   internal/worker
-testsuite/
-  main.go
+testsuite/            # NanoLink emulator: mock cloud + mock CWMP device + FTP (drives e2e)
+  main.go             # entry; plus cloud.go / device.go / soap.go / ftp.go / config.go / manifest.go
+  loggen/             # real-shaped log-archive generator (own package + tests)
+  conf/ assets/ fixtures/
   Dockerfile
 ```
-
-The prompt used `testsuire`; the implemented directory is the corrected `testsuite/`.
 
 ## Runtime Behavior
 
@@ -98,8 +98,9 @@ The agent binds `CWMP_LISTEN` (default `0.0.0.0:7547`) — the exact address the
 NanoLink dials — so any prior ACS on that port must be stopped first (see
 **Migration from GenieACS**). The FTP log-drop dir is assumed to already exist.
 
-Common `make` targets: `build`, `test`, `vet`, `run`, `install`, `uninstall`,
-`docker-build`, `docker-up`, `docker-down`, `docker-logs` (`make help` lists all).
+Common `make` targets: `build`, `test`, `test-suite`, `vet`, `run`, `install`, `uninstall`,
+`docker-build`, `docker-up`, `docker-down`, `docker-logs`, `e2e`, `e2e-scenario`, `e2e-all`, `verify`
+(`make help` lists all).
 
 Remove with `sudo ./scripts/uninstall.sh` (add `--purge` to also drop config,
 data, and the user).
@@ -107,14 +108,21 @@ data, and the user).
 ## Local Functional Test
 
 The stack lives in `docker-compose.test.yml` (a **test/validation harness**, not a production
-deploy — production is `scripts/install.sh` + systemd). Easiest is `make e2e` (or `make e2e-all`);
-the raw form:
+deploy — production is `scripts/install.sh` + systemd). One command runs the full gate:
+
+```bash
+make verify   # unit tests (agent) + unit tests (testsuite) + e2e sweep (7 scenarios)
+```
+
+Or a lighter loop: `make e2e` (happy only) / `make e2e-all` (7 scenarios). The raw form:
 
 ```bash
 docker compose -f docker-compose.test.yml up -d --build
 curl http://localhost:9000/health
 docker compose -f docker-compose.test.yml down -v
 ```
+
+See [`testsuite/README.md`](testsuite/README.md) for scenarios, `/health` fields, and debug modes.
 
 The testsuite container mocks the CloudlyNet `/v1/agent/**` cloud on port `9000` **and plays a mock NanoLink CWMP device** that dials the agent's in-agent ACS at `:7547` (Inform → ATC → GPV/SPV/GPN/Reboot), plus a connection-request listener on `:30005`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, acked configure/query/reboot commands over CWMP, and delivered all 24 managed configuration paths — with the ATC session completing (no Fault).
 

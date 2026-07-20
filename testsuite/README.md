@@ -18,26 +18,22 @@ Three containers on one Docker network, one shared volume (`edgeagent_ftp`) as t
  agent ──register/heartbeat/telemetry/poll/ack──▶ testsuite (mock cloud :9000)
 ```
 
-| Container | Role | Ports |
-|---|---|---|
-| `cloudlynet-edgeagent-testsuite` | mock **device** (dials the ACS + curl-uploads logs) **and** mock **cloud** | `:9000` (health), `:30005` (connection-request, internal) |
-| `cloudlynet-edgeagent` | agent under test — CWMP ACS + FTP-log collector + cloud client | `:7547` |
-| `ftp` | real `vsftpd` — receives uploads, writes to the shared volume | `:21` + passive `21100–21110` (internal) |
-| `ftp-init` | one-shot — pre-stages a write-protected `/uploads` dir for the `ftp-path-reject` scenario | — |
+| Container                        | Role                                                                                      | Ports                                                     |
+| -------------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `cloudlynet-edgeagent-testsuite` | mock **device** (dials the ACS + curl-uploads logs) **and** mock **cloud**                | `:9000` (health), `:30005` (connection-request, internal) |
+| `cloudlynet-edgeagent`           | agent under test — CWMP ACS + FTP-log collector + cloud client                            | `:7547`                                                   |
+| `ftp`                            | real `vsftpd` — receives uploads, writes to the shared volume                             | `:21` + passive `21100–21110` (internal)                  |
+| `ftp-init`                       | one-shot — pre-stages a write-protected `/uploads` dir for the `ftp-path-reject` scenario | —                                                         |
 
 The mock device uploads via real `curl → vsftpd → volume` (not a direct volume write); the agent's
 `WatchFTP` picks the files up from there.
 
-## Prerequisites
-
-- **Docker** running (Compose v2).
-- **Go** (only for the unit-test targets). On Apple Silicon the FTP image is
-  `delfer/alpine-ftp-server` (multi-arch, already wired — no setup).
-
 ## Quick start
 
 ```sh
-make e2e-all                                   # full end-to-end: all 7 scenarios (up → assert → down)
+make verify                                    # unit tests (agent) + unit tests (testsuite) + e2e sweep (7 scenarios)
+make e2e-all                                   # just the e2e sweep (7 scenarios) [up → assert → down]
+make e2e-all VERBOSE=1                         # ...with the per-check breakdown
 ```
 
 Or drive it by hand:
@@ -51,8 +47,9 @@ make docker-down                               # stop + remove (incl. the shared
 
 ## How the end-to-end test works
 
-Only the **agent is under test**; the testsuite mocks everything around it (see Architecture). A run
-drives the agent through the full device lifecycle, then asserts the result via the `/health` gate.
+Only the **agent is under test**; the testsuite stands in for everything around it — mock device, mock
+cloud, and a **real** vsftpd (see Architecture). A run drives the agent through the full device
+lifecycle, then asserts the result via the `/health` gate.
 
 **One run, end to end:**
 
@@ -81,75 +78,21 @@ drives the agent through the full device lifecycle, then asserts the result via 
    AND saw_expected_event         (THIS scenario's own signal classified)   ← per-scenario check
 ```
 
-`ok:true` collapses ~12 independent checks into one boolean. **Read the `/health` JSON only when `ok`
-is `false`** — the field that's `false` points at the stage that broke.
-
-**Why the runs look alike — and where to actually look:** the redacted real corpus
-(`fixtures/real_sample.log`) is replayed in every run and already carries curl `0/7/25/28/67` + an FM
-reboot + TR69 ACS lines, so the **same 8 `typed_events` fire in every scenario** (expected). The field
-that differs — and makes each run a distinct test — is **`expected_event`** (+ `saw_expected_event`).
-`atc-fault` is the tell: its event isn't in the corpus, so `atc_fault_loop` appears in `typed_events`
-*only* in that run. Per run, look at **`ok` + `expected_event`**; ignore the repetitive list.
-
-`/health` fields: `ok`, `registered`, `heartbeats`, `telemetry`, `events`, `failures`, `snapshots`,
-`snapshot_params`, `acks`, `typed_events`, `typed_event_on_canonical`, `expected_event`,
-`saw_expected_event`. (Always HTTP 200; `ok` is a body field.)
-
-## Coverage — what this verifies / what it does NOT
-
-Use this to judge whether the suite is sufficient for a given change. A green `make e2e-all`
-asserts, **every run**:
-
-- **Agent ↔ cloud lifecycle** — register + heartbeat + telemetry (incl. one forced failure →
-  outbox retry recovers).
-- **CWMP onboarding** — device `Inform` → agent resolves and stores the **canonical device id**.
-- **ATC handled without a SOAP Fault** — the session survives to the ACS's read/write turn (the
-  reason the CWMP rework exists).
-- **Full CPE RPC round-trip** — `GetRPCMethods` / `TransferComplete` / GPV / SPV / GPN / `Reboot`.
-- **Config snapshot** — the 24 managed params read via GPV and pushed to the cloud.
-- **Command loop** — 3 cloud commands (configure / query / reboot) applied over CWMP and acked.
-- **FTP log ingestion over a real vsftpd** (curl → ftpd → shared volume → `WatchFTP`), covering the
-  four ingestion fixes: module routed per-line from the inline `[MODULE]` tag; bare `Devicelog`
-  ingested; event keyed to the canonical device (not a phantom); rules classify curl `0/7/25/28/67`,
-  the TR-069 vendor-ACS-unreachable text, and the FM reboot alarm.
-- **Per-scenario signal** — each of the 7 fault lines classifies to its own typed event
-  (`saw_expected_event`).
-- **Two transport failures reproduced live over the wire** — `curl (25)` (STOR-denied `/uploads`)
-  and `curl (67)` (bad login).
-- **Content-derived dedup** — identical log lines collapse to one event.
-
-It does **NOT** cover (out of scope by design):
-
-- **Multiple devices / cells** — single device only.
-- **RAN/RF, E2 / A1 / O1, or KPI streams** — none; this exercises CWMP + FTP logs only.
-- **Adversarial/malformed CWMP** — well-formed happy-path session shapes only (no SOAP fuzzing,
-  oversized payloads, or auth attacks on `:7547`).
-- **`curl (7)` / `(28)` over the wire** — their rules are exercised via staged log content, but the
-  connection-failure / timeout transports are not actually induced live.
-- **Real cloud ingestion / Postgres dedup** — the cloud is a mock; dedup is asserted against its
-  in-memory set, not a real `ON CONFLICT(dedup_key)`.
-- **Cold-start deferral / not-yet-onboarded device** — unit-tested only; not exercised in
-  `docker-up` (the device always Informs before its first upload).
-- **Agent restart / buffer persistence / crash recovery**, and **performance / soak** — not driven.
-- **Real-box vsftpd parity** (passive range, real credentials) — see Real-box parity below.
-
-Operational caveat: over long runs each upload cycle writes a new `_PowerOn_<ts>_` archive and
-re-ingests, so `events` / disk / the collector's seen-path map grow with runtime — fine for the
-short functional runs this suite is for; the real device rotates in place.
-
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `make test` | Agent unit tests (`goagent/`). |
-| `make test-suite` | Testsuite unit tests (`loggen` generator). |
-| `make e2e` | End-to-end test of the `happy` scenario (up → assert `/health` → down). |
-| `make e2e-scenario SCENARIO=<name>` | Same, for one named scenario (see below). |
-| `make e2e-all` | End-to-end sweep across all 7 scenarios; non-zero exit if any fail. |
-| `make docker-up` / `make docker-down` | Start / stop+remove the stack (default scenario `happy`). |
-| `make docker-logs` | Tail the agent container logs. |
-| `make build` | Build the agent binary. |
-| `make sync-manifest` | Re-copy the param manifest into the testsuite's embedded asset. |
+| Command                               | What it does                                                                          |
+| ------------------------------------- | ------------------------------------------------------------------------------------- |
+| `make test`                           | Agent unit tests (`goagent/`).                                                        |
+| `make test-suite`                     | Testsuite unit tests (`loggen` generator).                                            |
+| `make test-all`                       | Unit tests for **both** modules (`goagent` + `testsuite`).                            |
+| `make e2e`                            | End-to-end test of the `happy` scenario. Add `VERBOSE=1` for the per-check breakdown. |
+| `make e2e-scenario SCENARIO=<name>`   | Same, for one named scenario (see below).                                             |
+| `make e2e-all`                        | End-to-end sweep across all 7 scenarios; non-zero exit if any fail.                   |
+| `make verify`                         | **Full pre-PR gate**: `test-all` (fail-fast) → `e2e-all`.                             |
+| `make docker-up` / `make docker-down` | Start / stop+remove the stack (default scenario `happy`).                             |
+| `make docker-logs`                    | Tail the agent container logs.                                                        |
+| `make build`                          | Build the agent binary.                                                               |
+| `make sync-manifest`                  | Re-copy the param manifest into the testsuite's embedded asset.                       |
 
 `make help` lists all targets.
 
@@ -167,15 +110,15 @@ make e2e-scenario SCENARIO=ftp-auth-fail
 EDGEAGENT_TESTSUITE_SCENARIO=ftp-auth-fail docker compose -f docker-compose.test.yml up -d --build
 ```
 
-| `SCENARIO=` | Represents (real-world condition) | Typed event | Live transport probe |
-|---|---|---|---|
-| `happy` | log upload succeeds | `ftp_upload_ok` | — (this *is* the working path) |
-| `ftp-path-reject` | server refuses the write — misconfigured/read-only upload path (the **dominant** real failure) | `ftp_upload_path_reject` | yes → real `curl (25)` (STOR denied at `/uploads`) |
-| `ftp-auth-fail` | wrong / rotated FTP credentials | `ftp_auth_fail` | yes → real `curl (67)` (login denied) |
-| `ftp-conn-fail` | FTP server down / unreachable | `ftp_conn_fail` | — (staged `curl (7)`) |
-| `ftp-timeout` | slow / unresponsive server, congested link | `ftp_upload_timeout` | — (staged `curl (28)`) |
-| `atc-fault` | the ACS breaks the CWMP session — the bug the in-agent-CWMP rework fixed (**regression guard**) | `atc_fault_loop` | — |
-| `reboot` | a critical fault auto-reboots the device (e.g. S1-setup max-retry) | `device_reboot` | — |
+| `SCENARIO=`       | Represents (real-world condition)                                                               | Typed event              | Live transport probe                               |
+| ----------------- | ----------------------------------------------------------------------------------------------- | ------------------------ | -------------------------------------------------- |
+| `happy`           | log upload succeeds                                                                             | `ftp_upload_ok`          | — (this _is_ the working path)                     |
+| `ftp-path-reject` | server refuses the write — misconfigured/read-only upload path (the **dominant** real failure)  | `ftp_upload_path_reject` | yes → real `curl (25)` (STOR denied at `/uploads`) |
+| `ftp-auth-fail`   | wrong / rotated FTP credentials                                                                 | `ftp_auth_fail`          | yes → real `curl (67)` (login denied)              |
+| `ftp-conn-fail`   | FTP server down / unreachable                                                                   | `ftp_conn_fail`          | — (staged `curl (7)`)                              |
+| `ftp-timeout`     | slow / unresponsive server, congested link                                                      | `ftp_upload_timeout`     | — (staged `curl (28)`)                             |
+| `atc-fault`       | the ACS breaks the CWMP session — the bug the in-agent-CWMP rework fixed (**regression guard**) | `atc_fault_loop`         | —                                                  |
+| `reboot`          | a critical fault auto-reboots the device (e.g. S1-setup max-retry)                              | `device_reboot`          | —                                                  |
 
 The content-carrying upload always targets the FTP root with working credentials, so the staged event
 reaches the agent regardless of scenario; the probe (path-reject / auth-fail) is a separate
@@ -188,31 +131,84 @@ FTP scenarios are the five `curl` outcomes the device's log-upload really produc
 fault with no rule (e.g. S1-setup failure) is **not** a scenario — it would only land as generic
 `unclassified`. New rule → new scenario.
 
+## Reading the console output
+
+Two verbosity levels:
+
+**Default (`make e2e-all`)** — one line per scenario, plus a footer listing what every run also checks:
+
+```
+NanoLink emulator · end-to-end (7 scenarios)
+
+ [1/7] happy            PASS   upload OK (curl 0) -> ftp_upload_ok
+ [2/7] ftp-path-reject  PASS   STOR denied at /uploads (curl 25) -> ftp_upload_path_reject
+ ...
+ RESULT: 7/7 PASS
+```
+
+**Verbose (`make e2e-all VERBOSE=1`, or `scripts/e2e.sh --verbose`)** — the per-check breakdown behind
+each PASS. Every scenario prints the **same 8 checks** (only the number/label after each changes),
+**plus a 9th** that appears _only_ for the two scenarios with a live wire-level probe:
+
+```
+── [2/7] ftp-path-reject ─────────────────────────────────────
+ verifies: STOR denied at /uploads (curl 25) -> ftp_upload_path_reject
+   agent registered with cloud        ok  registered=1
+   CWMP session reached ACS turn      ok  acks=3 (ATC answered, no Fault)
+   config snapshot                    ok  snapshot_params=24
+   commands applied + acked           ok  acks=3
+   outbox retry exercised             ok  failures=1
+   real FTP upload ingested           ok  events=38
+   scenario signal classified         ok  expected_event=ftp_upload_path_reject
+   event keyed to real device         ok  typed_event_on_canonical=true
+   transport fault reproduced         ok  curl: (25) in device logs   ← 9th, probe-only
+ => PASS
+```
+
+What each line means (`ok`/`XX` = pass/fail). The text after is the `/health` value the check read —
+except the 9th (probe) line, which greps the mock device's container logs, and line 2's parenthetical,
+which is an annotation, not a field:
+
+| Console line                                        | Passes when                        | Reading the value                       | What it proves                                                                                                                                                                                                                                                      |
+| --------------------------------------------------- | ---------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **agent registered with cloud**                     | `registered > 0`                   | `registered=1`                          | Agent found the mock cloud and enrolled. Nothing downstream works if this is 0.                                                                                                                                                                                     |
+| **CWMP session reached ACS turn**                   | `acks > 0`                         | `acks=3 (ATC answered, no Fault)`       | Mock device dialed `:7547`; agent answered the Inform **and** the ATC — session survived past the ATC instead of faulting (the GenieACS bug this replaces).                                                                                                         |
+| **config snapshot**                                 | `snapshot_params == 24`            | `snapshot_params=24`                    | Agent read the full 24-path managed catalogue via GPV and posted a config snapshot. Exactly 24 — not 23, not 25.                                                                                                                                                    |
+| **commands applied + acked**                        | `acks >= 3`                        | `acks=3`                                | Cloud pushed configure / query / reboot; agent applied all three over CWMP and acked. (Same counter as line 2, higher bar.)                                                                                                                                         |
+| **outbox retry exercised**                          | `failures > 0`                     | `failures=1`                            | At least one telemetry POST was force-failed so the SQLite outbox retry path actually runs.                                                                                                                                                                         |
+| **real FTP upload ingested**                        | `events > 0`                       | `events=38`                             | Device `curl`ed logs into the **real vsftpd**; agent's `WatchFTP` picked them off the shared volume, parsed them, emitted events.                                                                                                                                   |
+| **scenario signal classified**                      | `saw_expected_event == true`       | `expected_event=ftp_upload_path_reject` | **The per-scenario discriminator** — the one line whose _label_ changes per scenario. Confirms _this_ scenario's expected typed event fired.                                                                                                                        |
+| **event keyed to real device**                      | `typed_event_on_canonical == true` | `typed_event_on_canonical=true`         | The typed event was attributed to the canonical `%2D`-encoded `cwmp_id`, not a phantom/unresolved id.                                                                                                                                                               |
+| **transport fault reproduced** _(9th — probe-only)_ | `curl: (NN)` found in device logs  | `curl: (25) in device logs`             | Appears **only** for `ftp-path-reject` (curl 25) and `ftp-auth-fail` (curl 67) — the two scenarios that make a real `curl → vsftpd` upload genuinely fail with that code over the wire. The other five are content-only, so this line is absent (you see 8, not 9). |
+
+Lines 2 and 4 read the **same** `acks` counter (`>0` vs `>=3`), so a run that fails only line 4 got a
+partial command loop.
+
 ## Configuration
 
 Optional file `conf/nanolink.conf` (all fields default; env vars win over the file; custom path via
 `NANOLINK_CONF`):
 
-| `.conf` key | Default | Env override |
-|---|---|---|
-| `identity.oui` | `8C1F64` | — |
-| `identity.product_class` | `ENB-N03002-B3` | — |
-| `identity.serial` | `2205600282` | — |
-| `ftp.host` | `ftp` | `FTP_HOST` |
-| `ftp.user` | `nybsys` | `FTP_USER` |
-| `ftp.pass` | *(empty)* | `FTP_PASS` |
-| `ftp.upload_interval` | `60s` | — |
-| `scenario` | `happy` | `NANOLINK_SCENARIO` |
+| `.conf` key              | Default         | Env override        |
+| ------------------------ | --------------- | ------------------- |
+| `identity.oui`           | `8C1F64`        | —                   |
+| `identity.product_class` | `ENB-N03002-B3` | —                   |
+| `identity.serial`        | `2205600282`    | —                   |
+| `ftp.host`               | `ftp`           | `FTP_HOST`          |
+| `ftp.user`               | `nybsys`        | `FTP_USER`          |
+| `ftp.pass`               | _(empty)_       | `FTP_PASS`          |
+| `ftp.upload_interval`    | `60s`           | —                   |
+| `scenario`               | `happy`         | `NANOLINK_SCENARIO` |
 
 Compose-level overrides (all optional, with defaults):
 
-| Env var | Default | Effect |
-|---|---|---|
-| `EDGEAGENT_TESTSUITE_SCENARIO` | `happy` | selects the scenario (→ `NANOLINK_SCENARIO`) |
-| `EDGEAGENT_TESTSUITE_PORT` | `9000` | host port for the mock cloud / `/health` |
-| `EDGEAGENT_TESTSUITE_MODE` | `full` | `full` / `acs` / `acsftp` (see Debug modes) |
-| `EDGEAGENT_CWMP_PORT` | `7547` | host port for the agent's CWMP ACS |
-| `FTP_USER` / `FTP_PASS` | `nybsys` / `nybsys-local-test` | vsftpd + device credentials |
+| Env var                        | Default                        | Effect                                       |
+| ------------------------------ | ------------------------------ | -------------------------------------------- |
+| `EDGEAGENT_TESTSUITE_SCENARIO` | `happy`                        | selects the scenario (→ `NANOLINK_SCENARIO`) |
+| `EDGEAGENT_TESTSUITE_PORT`     | `9000`                         | host port for the mock cloud / `/health`     |
+| `EDGEAGENT_TESTSUITE_MODE`     | `full`                         | `full` / `acs` / `acsftp` (see Debug modes)  |
+| `EDGEAGENT_CWMP_PORT`          | `7547`                         | host port for the agent's CWMP ACS           |
+| `FTP_USER` / `FTP_PASS`        | `nybsys` / `nybsys-local-test` | vsftpd + device credentials                  |
 
 ## Log generation
 
@@ -240,8 +236,15 @@ after it changes, then rebuild the testsuite image.
 
 ## Debug modes
 
-`EDGEAGENT_TESTSUITE_MODE=acs` (or `acsftp`) disables the mock cloud and serves a lighter `/health`
-(CWMP dial status + FTP archive count) for debugging the CWMP or FTP path in isolation.
+`EDGEAGENT_TESTSUITE_MODE` selects what the testsuite plays:
+
+| Value | Mock cloud (`:9000`) | Behaviour |
+|---|---|---|
+| `full` *(default)* | full mock cloud | mock cloud + mock CWMP device + real vsftpd — the complete e2e gate above. |
+| `acs` / `acsftp` | **disabled** | testsuite plays only the CWMP device + FTP and serves a lighter `/health` (CWMP dial status + FTP archive count). Point the agent at a **real** cloud, or isolate the CWMP/FTP path. |
+
+`acs` and `acsftp` are currently behaviour-equivalent (both hit the lighter health handler); the two
+names exist to signal intent (CWMP-only focus vs. CWMP+FTP against a real cloud).
 
 ## Real-box parity
 
