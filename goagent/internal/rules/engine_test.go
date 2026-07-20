@@ -36,8 +36,8 @@ func TestDefaultRules(t *testing.T) {
 func TestModuleFromLine(t *testing.T) {
 	cases := map[string]string{
 		"0000000055 2024-06-02 11:25:28.933 [FILE_TRANS] File upload failure, curl code=(25)": "FILE_TRANS",
-		"0000000030 2024-06-02 07:07:38.097 [TR69] Alarm Report, id: 0x18020500":               "TR69",
-		"no tag here at all":                                                                   "",
+		"0000000030 2024-06-02 07:07:38.097 [TR69] Alarm Report, id: 0x18020500":              "TR69",
+		"no tag here at all": "",
 	}
 	for line, want := range cases {
 		if got := moduleFromLine(line); got != want {

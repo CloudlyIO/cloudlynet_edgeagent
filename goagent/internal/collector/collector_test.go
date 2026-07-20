@@ -124,7 +124,7 @@ func TestScanFTPRealArchiveRoutesModuleAndDeviceID(t *testing.T) {
 	}
 }
 
-// TestScanFTPBareDevicelogIngested is the A′ regression guard: a bare
+// TestScanFTPBareDevicelogIngested guards bare-Devicelog ingestion: a bare
 // "*_Devicelog" upload (no .tgz) must be picked up by scanFTP's glob and have
 // its inline-tagged lines classified — not silently dropped by a .tgz-only filter.
 func TestScanFTPBareDevicelogIngested(t *testing.T) {

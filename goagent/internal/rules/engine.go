@@ -42,8 +42,8 @@ func Load(path string) (*Engine, error) {
 
 func DefaultEngine() *Engine {
 	e, _ := compile([]Rule{
-		// Real ACS-failure lines live in TR69 (not FM); the vendor IP no longer
-		// gates the match — IP-agnostic on module+text (see engine.go doc + plan).
+		// Real ACS-failure lines live in TR69 (not FM), and the match is
+		// IP-agnostic (module + text only, no vendor IP).
 		{Module: "TR69", Match: `ACS (Connect Status = 2|connect failed|Disconnect with error)`, EventType: "vendor_acs_unreachable", Severity: "major", Message: "Vendor ACS unreachable"},
 		{Module: "TR69", Match: `RPC Unknown received from ACS`, EventType: "atc_fault_loop", Severity: "major", Message: "ACS returned Fault to ATC"},
 		{Module: "FILE_TRANS", Match: `File upload success, curl code=\(0\)`, EventType: "ftp_upload_ok", Severity: "info", Message: "FTP upload succeeded"},

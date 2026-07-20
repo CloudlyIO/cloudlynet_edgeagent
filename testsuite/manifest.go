@@ -9,9 +9,8 @@ import (
 // nanolink_param_manifest.json is a copy of the in-repo, production-embedded
 // manifest (goagent/internal/cwmp/assets/nanolink_param_manifest.json),
 // synced via `make sync-manifest`. testsuite is a separate Go module and
-// cannot import goagent/internal, so it embeds its own copy — the in-repo
-// path is the single source of truth (not the sibling gitignored task_docs
-// copy, which lives in a different repo).
+// cannot import goagent/internal, so it embeds its own copy; that in-repo
+// manifest is the single source of truth.
 //
 //go:embed assets/nanolink_param_manifest.json
 var manifestBytes []byte
@@ -24,8 +23,8 @@ type manifestParam struct {
 }
 
 // manifest is the parsed NanoLink parameter tree (20,260 params), seeding the
-// mock device's store so a GetParameterValues for any managed path — not just
-// the old ~33 hardcoded ones — returns a realistic value + xsi:type (finding D).
+// mock device's store so a GetParameterValues for any managed path returns a
+// realistic value + xsi:type.
 type manifest struct {
 	Params []manifestParam `json:"params"`
 	byPath map[string]manifestParam

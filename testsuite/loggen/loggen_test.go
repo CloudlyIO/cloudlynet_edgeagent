@@ -27,13 +27,13 @@ func TestArchiveAndDeviceLogNamesMatchRealShape(t *testing.T) {
 		t.Errorf("DeviceLogName() = %q, want %q", got, want)
 	}
 	if strings.HasSuffix(cfg.DeviceLogName(), ".tgz") {
-		t.Errorf("DeviceLogName() must not carry a .tgz suffix (A′ regression)")
+		t.Errorf("DeviceLogName() must not carry a .tgz suffix (bare Devicelog upload)")
 	}
 }
 
-// TestGenerateRingArchiveHasNumberedEntries locks in the ring layout finding
-// A targets: entries named 1…10/index/max (never a module-named entry),
-// module living only inline on each line.
+// TestGenerateRingArchiveHasNumberedEntries locks in the ring layout: entries
+// named 1…10/index/max (never a module-named entry), module living only inline
+// on each line.
 func TestGenerateRingArchiveHasNumberedEntries(t *testing.T) {
 	cfg := testConfig(ScenarioHappy)
 	const scmLine = "0000000057 2024-06-02 11:25:29.190 [SCM] Process(pid=1843) tr69c started"

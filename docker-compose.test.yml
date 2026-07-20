@@ -90,10 +90,10 @@ services:
     networks:
       - cloudlynet-edge
 
-  # vsftpd ingress (finding C): the mock device curl-uploads real-shaped log
-  # archives here, exactly like the real NanoLink; vsftpd writes into the
-  # shared edgeagent_ftp volume the agent's WatchFTP polls. No agent code
-  # change — the agent still just watches a directory.
+  # vsftpd ingress: the mock device curl-uploads real-shaped log archives here,
+  # exactly like the real NanoLink; vsftpd writes into the shared edgeagent_ftp
+  # volume the agent's WatchFTP polls. No agent code change — the agent still
+  # just watches a directory.
   #
   # Image: delfer/alpine-ftp-server (real vsftpd on Alpine, genuinely
   # multi-arch amd64/arm64). fauria/vsftpd (CentOS7/amd64-only) was tried
@@ -110,7 +110,7 @@ services:
       # ADDRESS names the compose service; the image's vsftpd.conf already sets
       # pasv_addr_resolve=YES so a service name (not a raw IP) resolves.
       # Bounded passive-port range is the knob that produces a real curl
-      # (25)/(28) when misconfigured (see docs/task_docs .../ref/ftp_server_and_test_flow.md §5).
+      # (25)/(28) when misconfigured.
       ADDRESS: ftp
       MIN_PORT: "21100"
       MAX_PORT: "21110"

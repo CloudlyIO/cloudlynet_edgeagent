@@ -24,7 +24,7 @@ import (
 const autonomousTransferCompletePolicy = "Device.X_8C1F64_DebugMgmt.Upload.AutonomousTransferCompletePolicy"
 
 // Inventory liveness/identity paths read from the CWMP parameter cache to
-// enrich the device inventory (replaces the old the former ACS document dig).
+// enrich the device inventory (replaces the former ACS document dig).
 const (
 	pathRFTxStatus = "Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus"
 	pathOpState    = "Device.Services.FAPService.1.FAPControl.LTE.OpState"
@@ -379,7 +379,7 @@ func (c *Collector) eventsFromArchive(path, deviceID string) ([]cloud.EventItem,
 
 // eventsFromLog handles a bare (non-archive) upload — the real Devicelog,
 // which carries the same "<seq> <ts> [MODULE] <msg>" line format as the ring
-// archive entries but is uploaded uncompressed with no .tgz extension (A′).
+// archive entries but is uploaded uncompressed with no .tgz extension.
 func (c *Collector) eventsFromLog(path, deviceID string) ([]cloud.EventItem, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

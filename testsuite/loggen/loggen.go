@@ -1,14 +1,12 @@
 // Package loggen builds real-shaped NanoLink log archives: a gzipped tar
 // ("continuouslogging.tgz") with the numbered ring layout (entries 1…10 +
 // index/max, no per-entry module semantics) and a bare "Devicelog" upload —
-// the two real upload shapes finding A/A′ target. Content is a redacted real
+// the two real upload shapes the agent ingests. Content is a redacted real
 // sample plus synthetic per-module lines, so every generated archive exercises
 // the agent's inline "[MODULE]" routing exactly like the genuine device.
 //
-// Fidelity scope (dev-defaulted, see docs/task_docs .../notes.md): ring layout
-// without live rotation/wrap, single device, continuouslogging + Devicelog
-// only (no hourly Log_*/ErrorLog_* — real NanoLink modules only, out of scope
-// here).
+// Fidelity scope: ring layout without live rotation/wrap, single device,
+// continuouslogging + Devicelog only (no hourly Log_*/ErrorLog_*).
 package loggen
 
 import (
@@ -86,11 +84,12 @@ func syntheticLines(cfg Config) []string {
 // seeded from sampleLines (the redacted real corpus) plus per-module
 // synthetic filler and the scenario's fault-signature line.
 func Generate(cfg Config, sampleLines []string) (archive []byte, deviceLog []byte, err error) {
-	seq := fmt.Sprintf("%010d", 1)
-	scenarioLine := seq + " " + cfg.PowerOnAt.Format("2006-01-02 15:04:05.000") + " " + scenarioLines[cfg.Scenario]
-	if cfg.Scenario == "" {
-		scenarioLine = seq + " " + cfg.PowerOnAt.Format("2006-01-02 15:04:05.000") + " " + scenarioLines[ScenarioHappy]
+	scenario := cfg.Scenario
+	if scenario == "" {
+		scenario = ScenarioHappy
 	}
+	seq := fmt.Sprintf("%010d", 1)
+	scenarioLine := seq + " " + cfg.PowerOnAt.Format("2006-01-02 15:04:05.000") + " " + scenarioLines[scenario]
 
 	lines := make([]string, 0, len(sampleLines)+len(syntheticLines(cfg))+1)
 	lines = append(lines, scenarioLine)
@@ -102,13 +101,10 @@ func Generate(cfg Config, sampleLines []string) (archive []byte, deviceLog []byt
 		return nil, nil, err
 	}
 	// The bare Devicelog is the device's ALARM log — a distinct, smaller stream
-	// than the full continuous ring, NOT a byte-for-byte copy of it. Emitting
-	// identical content to both double-ingested every operational line (the
-	// bulk: FILE_TRANS curl lines); the alarm subset keeps each upload shape
-	// carrying representative-but-distinct content. Alarm lines legitimately
-	// appear in BOTH streams on the real device too (an alarm is in the rolling
-	// log and the alarm log) — that residual overlap is the agent's dedup
-	// domain, keyed on (device, ts, event, raw).
+	// than the full continuous ring, not a copy of it. Alarm lines legitimately
+	// appear in both streams on the real device (an alarm is in the rolling log
+	// and the alarm log); that residual overlap is deduped at the cloud on the
+	// content-derived key (device, eventType, raw) — see rules.dedup.
 	deviceLog = buildDeviceLog(alarmLines(lines))
 	return archive, deviceLog, nil
 }
@@ -179,7 +175,7 @@ func buildRingArchive(lines []string) ([]byte, error) {
 
 // buildDeviceLog concatenates the given (alarm-class) lines uncompressed — the
 // real Devicelog carries the identical "<seq> <ts> [MODULE] <msg>" format, just
-// uploaded bare (A′) and scoped to the alarm stream (see alarmLines).
+// uploaded bare (no .tgz) and scoped to the alarm stream (see alarmLines).
 func buildDeviceLog(lines []string) []byte {
 	var buf bytes.Buffer
 	for _, l := range lines {
