@@ -24,9 +24,9 @@ export COMPOSE_FILE := docker-compose.test.yml
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-suite vet fmt run clean install uninstall \
+.PHONY: help build test test-suite test-all vet fmt run clean install uninstall \
         docker-build docker-up docker-down docker-logs sync-manifest \
-        e2e e2e-scenario e2e-all
+        e2e e2e-scenario e2e-all verify
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -43,11 +43,15 @@ test: ## Run agent unit tests (goagent module)
 test-suite: ## Run testsuite unit tests (loggen generator)
 	cd testsuite && $(GO) test ./...
 
-vet: ## Run go vet
-	cd $(GOAGENT_DIR) && $(GO) vet ./...
+test-all: test test-suite ## Run unit tests for both modules (goagent + testsuite)
 
-fmt: ## Format Go sources
+vet: ## Run go vet (both modules)
+	cd $(GOAGENT_DIR) && $(GO) vet ./...
+	cd testsuite && $(GO) vet ./...
+
+fmt: ## Format Go sources (both modules)
 	cd $(GOAGENT_DIR) && $(GO) fmt ./...
+	cd testsuite && $(GO) fmt ./...
 
 run: build ## Build and run locally against config/agent.yaml
 	./$(BIN) --config config/agent.yaml
@@ -85,3 +89,6 @@ e2e-scenario: ## Run one scenario e2e (SCENARIO=happy|ftp-path-reject|ftp-auth-f
 
 e2e-all: ## End-to-end sweep across all 7 scenarios (VERBOSE=1 for per-check detail; non-zero exit if any fail)
 	@./scripts/e2e.sh --all $(if $(filter 1,$(VERBOSE)),--verbose)
+
+verify: test-all e2e-all ## Full pre-PR gate: unit tests (both modules, fail-fast) THEN all 7 e2e scenarios
+	@echo "verify: unit + e2e all green"
