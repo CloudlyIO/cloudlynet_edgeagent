@@ -246,6 +246,36 @@ after it changes, then rebuild the testsuite image.
 `acs` and `acsftp` are currently behaviour-equivalent (both hit the lighter health handler); the two
 names exist to signal intent (CWMP-only focus vs. CWMP+FTP against a real cloud).
 
+## Validating against the real platform
+
+`full` mode is self-contained. To validate the live config loop against a **real** NetAI cloud — "add
+this as a device and configure it from the dashboard", no lab hardware — run in `acsftp` mode: the mock
+cloud switches off and the testsuite plays only the mock NanoLink device (+ FTP), so the real agent
+talks to your platform.
+
+```sh
+EDGEAGENT_TESTSUITE_MODE=acsftp \
+CLOUDLYNET_ENROLLMENT_TOKEN='<token from the dashboard>' \
+CLOUDLYNET_BASE_URL='https://<your-netai-url>/' \
+docker compose -f docker-compose.test.yml up -d --build \
+  cloudlynet-edgeagent-testsuite cloudlynet-edgeagent ftp ftp-init
+```
+
+Then, on the dashboard:
+
+- **Onboard** — the mock device dials the agent's ACS; the agent registers it → it appears as a CWMP
+  device.
+- **Read (pull)** — the agent posts a 24-param config snapshot + telemetry → visible on the device's
+  Config / telemetry views.
+- **Push** — edit a writable param (`ReferenceSignalPower`, `PeriodicInformInterval`, anything under
+  `.CellConfig.`) → the agent applies it over CWMP (`SetParameterValues`), reads it back, and the
+  command reaches `applied` with the matching value.
+
+Notes: use a real enrollment token (override `CLOUDLYNET_BASE_URL` if it embeds `localhost`); the agent
+needs **outbound** reachability only (NAT-friendly, no port-forward); commands arrive on the poll
+cadence. The mock device is in-memory, so pushed config persists for the session. In this mode `/health`
+on `:9000` is the lighter CWMP-dial + FTP-archive view (the mock-cloud gate is off).
+
 ## Real-box parity
 
 Before treating a laptop run as representative of the real edge box, confirm from the box:
