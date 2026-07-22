@@ -3,6 +3,7 @@ package cwmp
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +56,7 @@ func (s *Session) Handle(env *Envelope) interface{} {
 	case b.GetParameterNamesResponse != nil:
 		return s.onGPN(b.GetParameterNamesResponse)
 	case b.RebootResponse != nil:
+		log.Printf("[CWMP][%s] <- Reboot ack", s.DeviceID)
 		return s.finishInflight(TaskResult{Type: TaskReboot})
 	case b.Fault != nil:
 		return s.onFault(b.Fault)
@@ -119,15 +121,22 @@ func (s *Session) onGPV(r *GetParameterValuesResponse) interface{} {
 		params[pv.Name] = pv.Value.Text
 		s.store.CacheParam(s.DeviceID, pv.Name, pv.Value.Text)
 	}
+	log.Printf("[CWMP][%s] <- GPV %d param(s)", s.DeviceID, len(r.ParameterList))
 	return s.finishInflight(TaskResult{Type: TaskGPV, Params: params})
 }
 
 func (s *Session) onSPV(r *SetParameterValuesResponse) interface{} {
+	label := "applied"
+	if r.Status == 1 {
+		label = "applied-after-reboot"
+	}
+	log.Printf("[CWMP][%s] <- SPV status=%d (%s)", s.DeviceID, r.Status, label)
 	return s.finishInflight(TaskResult{Type: TaskSPV, Status: r.Status})
 }
 
 func (s *Session) onGPN(r *GetParameterNamesResponse) interface{} {
 	s.store.SaveWritability(s.DeviceID, r.ParameterList)
+	log.Printf("[CWMP][%s] <- GPN %d name(s)", s.DeviceID, len(r.ParameterList))
 	return s.finishInflight(TaskResult{Type: TaskGPN, Names: r.ParameterList})
 }
 
@@ -179,21 +188,38 @@ func (s *Session) nextTask() interface{} {
 		s.inflight = &t
 		switch t.Type {
 		case TaskGPV:
+			hint := ""
+			if strings.HasSuffix(t.CommandID, ":rb") {
+				hint = " (read-back)"
+			}
+			log.Printf("[CWMP][%s] -> GPV %v%s", s.DeviceID, t.Paths, hint)
 			return &GetParameterValues{ParameterNames: t.Paths}
 		case TaskSPV:
+			log.Printf("[CWMP][%s] -> SPV %s key=%s", s.DeviceID, formatWrites(t.Writes), t.CmdKey)
 			return &SetParameterValues{ParameterList: t.Writes, ParameterKey: t.CmdKey}
 		case TaskGPN:
 			path := "Device."
 			if len(t.Paths) > 0 {
 				path = t.Paths[0]
 			}
+			log.Printf("[CWMP][%s] -> GPN %s", s.DeviceID, path)
 			return &GetParameterNames{ParameterPath: path, NextLevel: false}
 		case TaskReboot:
+			log.Printf("[CWMP][%s] -> Reboot key=%s", s.DeviceID, t.CmdKey)
 			return &Reboot{CommandKey: t.CmdKey}
 		}
 	default:
 	}
 	return nil
+}
+
+// formatWrites renders SPV writes as "name=value, …" for the TR-069 log.
+func formatWrites(writes []ParameterValueStruct) string {
+	parts := make([]string, len(writes))
+	for i, w := range writes {
+		parts[i] = w.Name + "=" + w.Value.Text
+	}
+	return strings.Join(parts, ", ")
 }
 
 func eventCodes(ev []EventStruct) []string {
