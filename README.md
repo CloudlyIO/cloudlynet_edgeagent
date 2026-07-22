@@ -114,7 +114,9 @@ deploy — production is `scripts/install.sh` + systemd). One command runs the f
 make verify   # unit tests (agent) + unit tests (testsuite) + e2e sweep (7 scenarios)
 ```
 
-Or a lighter loop: `make e2e` (happy only) / `make e2e-all` (7 scenarios). The raw form:
+Or a lighter loop: `make e2e` (happy only) / `make e2e-all` (7 scenarios). These `make` targets are
+**self-contained** — they run against the mock cloud and **ignore any `.env`** (so a real-cloud `.env`
+can't derail them); for a real-cloud run see **Live Platform Validation** below. The raw form:
 
 ```bash
 docker compose -f docker-compose.test.yml up -d --build

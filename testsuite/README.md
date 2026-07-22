@@ -186,6 +186,11 @@ partial command loop.
 
 ## Configuration
 
+> **`make e2e` / `e2e-all` / `verify` ignore `.env`** — they run the self-contained mock-cloud gate
+> (`docker compose --env-file /dev/null`, always full mode + mock cloud), so nothing here can point the
+> agent at a real cloud by accident. The knobs below apply to a **manual `docker compose up`** (e.g. the
+> acsftp run in [Validating against the real platform](#validating-against-the-real-platform)).
+
 Optional file `conf/nanolink.conf` (all fields default; env vars win over the file; custom path via
 `NANOLINK_CONF`):
 
@@ -252,6 +257,9 @@ names exist to signal intent (CWMP-only focus vs. CWMP+FTP against a real cloud)
 this as a device and configure it from the dashboard", no lab hardware — run in `acsftp` mode: the mock
 cloud switches off and the testsuite plays only the mock NanoLink device (+ FTP), so the real agent
 talks to your platform.
+
+This is a **manual `docker compose up`** flow (below) — the `make e2e*` targets deliberately ignore
+`.env`, so they'll never pick up your `acsftp` settings; run compose directly here.
 
 ```sh
 EDGEAGENT_TESTSUITE_MODE=acsftp \
