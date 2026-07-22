@@ -8,6 +8,19 @@ real NanoLink deployment needs: a mock **CPE device**, a mock **CloudlyNet cloud
 
 Background: issue [CloudlyIO/cloudlynet_ai#346](https://github.com/CloudlyIO/cloudlynet_ai/issues/346).
 
+## Two ways to run
+
+| Goal | Mode | How | `.env` |
+|---|---|---|---|
+| Test the agent locally (CI / pre-PR) | **full** (all-mock) | `make e2e` / `e2e-all` / `verify` | ignored |
+| Validate against a real cloud (onboard / read / push from the dashboard) | **acsftp** | copy `.env.example` → `.env`, set the token, `docker compose up` | required |
+
+- **Full mock** is self-contained (mock cloud + mock device + real vsftpd). The `make` targets always
+  run this and **ignore `.env`** (`docker compose --env-file /dev/null`), so a real-cloud `.env` can
+  never redirect them. No `.env` needed — just run the command.
+- **acsftp** switches the mock cloud off so the agent talks to your real platform. It's a manual
+  `docker compose up` driven by `.env` — see [Validating against the real platform](#validating-against-the-real-platform).
+
 ## Architecture
 
 Three containers on one Docker network, one shared volume (`edgeagent_ftp`) as the FTP hand-off:
@@ -194,30 +207,31 @@ partial command loop.
 Optional file `conf/nanolink.conf` (all fields default; env vars win over the file; custom path via
 `NANOLINK_CONF`):
 
-| `.conf` key              | Default         | Env override        |
-| ------------------------ | --------------- | ------------------- |
-| `identity.oui`           | `8C1F64`        | —                   |
-| `identity.product_class` | `ENB-N03002-B3` | —                   |
-| `identity.serial`        | `2205609999`    | `NANOLINK_SERIAL`   |
-| `ftp.host`               | `ftp`           | `FTP_HOST`          |
-| `ftp.user`               | `nybsys`        | `FTP_USER`          |
-| `ftp.pass`               | _(empty)_       | `FTP_PASS`          |
-| `ftp.upload_interval`    | `60s`           | —                   |
-| `scenario`               | `happy`         | `NANOLINK_SCENARIO` |
+| `.conf` key              | Default         | Env override             |
+| ------------------------ | --------------- | ------------------------ |
+| `identity.oui`           | `8C1F64`        | `NANOLINK_OUI`           |
+| `identity.product_class` | `ENB-N03002-B3` | `NANOLINK_PRODUCT_CLASS` |
+| `identity.serial`        | `2205609999`    | `NANOLINK_SERIAL`        |
+| `ftp.host`               | `ftp`           | `FTP_HOST`               |
+| `ftp.user`               | `nybsys`        | `FTP_USER`               |
+| `ftp.pass`               | _(empty)_       | `FTP_PASS`               |
+| `ftp.upload_interval`    | `60s`           | —                        |
+| `scenario`               | `happy`         | `NANOLINK_SCENARIO`      |
 
 > **Why the serial is synthetic.** `cwmp_id = OUI-ProductClass-Serial` is UNIQUE per tenant on the
 > real cloud, so reusing a *real* device's serial makes an `acsftp` run collide with that device's
 > cell (your heartbeat updates it instead of creating one under your edge → nothing shows on the
-> dashboard). Default `2205609999` is test-only; set `NANOLINK_SERIAL` per-tester when sharing a
-> cloud. Full mode is unaffected (mock cloud has no unique constraint). The corpus's inline serial is
-> log *content* only — attribution keys off the upload filename, which uses the configured serial.
+> dashboard). Default `2205609999` is test-only; override any identity field per-tester when sharing
+> a cloud. Full mode is unaffected (mock cloud has no unique constraint). The configured identity also
+> drives the device id in the **generated FTP log content** — the corpus's captured id is rewritten to
+> match, so filenames *and* log lines read consistently.
 
 Compose-level overrides (all optional, with defaults):
 
 | Env var                        | Default                        | Effect                                       |
 | ------------------------------ | ------------------------------ | -------------------------------------------- |
 | `EDGEAGENT_TESTSUITE_SCENARIO` | `happy`                        | selects the scenario (→ `NANOLINK_SCENARIO`) |
-| `EDGEAGENT_TESTSUITE_SERIAL`   | _(empty → conf default)_       | device serial for acsftp (→ `NANOLINK_SERIAL`) |
+| `EDGEAGENT_TESTSUITE_OUI` / `_PRODUCT_CLASS` / `_SERIAL` | _(empty → conf default)_ | device identity for acsftp (→ `NANOLINK_OUI` / `_PRODUCT_CLASS` / `_SERIAL`) |
 | `EDGEAGENT_TESTSUITE_PORT`     | `9000`                         | host port for the mock cloud / `/health`     |
 | `EDGEAGENT_TESTSUITE_MODE`     | `full`                         | `full` / `acs` / `acsftp` (see Debug modes)  |
 | `EDGEAGENT_CWMP_PORT`          | `7547`                         | host port for the agent's CWMP ACS           |
@@ -253,7 +267,7 @@ after it changes, then rebuild the testsuite image.
 
 | Value | Mock cloud (`:9000`) | Behaviour |
 |---|---|---|
-| `full` *(default)* | full mock cloud | mock cloud + mock CWMP device + real vsftpd — the complete e2e gate above. |
+| `full` *(default when unset; `.env.example` ships `acsftp`)* | full mock cloud | mock cloud + mock CWMP device + real vsftpd — the complete e2e gate above. |
 | `acs` / `acsftp` | **disabled** | testsuite plays only the CWMP device + FTP and serves a lighter `/health` (CWMP dial status + FTP archive count). Point the agent at a **real** cloud, or isolate the CWMP/FTP path. |
 
 `acs` and `acsftp` are currently behaviour-equivalent (both hit the lighter health handler); the two
@@ -266,13 +280,12 @@ this as a device and configure it from the dashboard", no lab hardware — run i
 cloud switches off and the testsuite plays only the mock NanoLink device (+ FTP), so the real agent
 talks to your platform.
 
-This is a **manual `docker compose up`** flow (below) — the `make e2e*` targets deliberately ignore
-`.env`, so they'll never pick up your `acsftp` settings; run compose directly here.
+This is a **manual `docker compose up`** flow — the `make e2e*` targets deliberately ignore `.env`, so
+run compose directly:
 
 ```sh
-EDGEAGENT_TESTSUITE_MODE=acsftp \
-CLOUDLYNET_ENROLLMENT_TOKEN='<token from the dashboard>' \
-CLOUDLYNET_BASE_URL='https://<your-netai-url>/' \
+cp .env.example .env
+# edit .env: set CLOUDLYNET_ENROLLMENT_TOKEN (dashboard "add device"); MODE is already acsftp
 docker compose -f docker-compose.test.yml up -d --build \
   cloudlynet-edgeagent-testsuite cloudlynet-edgeagent ftp ftp-init
 ```

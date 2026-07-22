@@ -65,7 +65,9 @@ event is present that run; the fixture supplies everything else.
 ## The fixture
 
 `fixtures/real_sample.log` is a **small, redacted, real capture** from an actual NanoLink
-(OUI `8C1F64`, serial `2205600282`) — 31 lines hand-picked to cover the formats the agent must parse:
+(captured as OUI `8C1F64`, serial `2205600282`) — 31 lines hand-picked to cover the formats the agent
+must parse. `loggen` **rewrites that captured identity to the configured device** at generation, so the
+lines you actually see carry the run's OUI/serial (default `2205609999`), not the capture's:
 
 - all five FTP `curl` codes the device really emits — `(0)` success, `(7)` can't-connect,
   `(25)` STOR-denied, `(28)` timeout, `(67)` login-denied;

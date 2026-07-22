@@ -62,11 +62,18 @@ func loadNanolinkConfig(path string) (nanolinkConfig, error) {
 	return cfg, nil
 }
 
-// withEnvOverrides applies the same env-var knobs docker-compose.test.yml already
-// wires (FTP_HOST/FTP_USER/FTP_PASS/NANOLINK_SCENARIO/NANOLINK_SERIAL), taking
-// precedence over the .conf — consistent with this file's env-first convention.
+// withEnvOverrides applies the env-var knobs docker-compose.test.yml wires
+// (identity: NANOLINK_OUI/NANOLINK_PRODUCT_CLASS/NANOLINK_SERIAL; plus
+// FTP_HOST/FTP_USER/FTP_PASS/NANOLINK_SCENARIO), taking precedence over the
+// .conf — consistent with this file's env-first convention.
 func (c nanolinkConfig) withEnvOverrides() nanolinkConfig {
-	// Per-tester serial → distinct cwmp_ids for concurrent acsftp runs.
+	// Identity overrides → distinct cwmp_ids for concurrent acsftp runs.
+	if v := os.Getenv("NANOLINK_OUI"); v != "" {
+		c.Identity.OUI = v
+	}
+	if v := os.Getenv("NANOLINK_PRODUCT_CLASS"); v != "" {
+		c.Identity.ProductClass = v
+	}
 	if v := os.Getenv("NANOLINK_SERIAL"); v != "" {
 		c.Identity.Serial = v
 	}

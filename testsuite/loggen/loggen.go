@@ -16,7 +16,17 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
+)
+
+// The redacted corpus was captured from a real device; these are the identity
+// tokens baked into its log CONTENT. rewriteIdentity swaps them for the
+// configured device so the FTP logs read consistently (filenames already do).
+const (
+	corpusOUI          = "8C1F64"
+	corpusSerial       = "2205600282"
+	corpusProductClass = "ENB-N03002-B3"
 )
 
 // ringSize matches the real device's numbered-entry ring (1…10 + index/max).
@@ -80,6 +90,25 @@ func syntheticLines(cfg Config) []string {
 	}
 }
 
+// rewriteIdentity swaps the corpus's captured OUI/serial/product-class for the
+// configured device's, so the FTP log content matches the emulated identity.
+func rewriteIdentity(lines []string, cfg Config) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if cfg.OUI != "" {
+			l = strings.ReplaceAll(l, corpusOUI, cfg.OUI)
+		}
+		if cfg.Serial != "" {
+			l = strings.ReplaceAll(l, corpusSerial, cfg.Serial)
+		}
+		if cfg.ProductClass != "" {
+			l = strings.ReplaceAll(l, corpusProductClass, cfg.ProductClass)
+		}
+		out[i] = l
+	}
+	return out
+}
+
 // Generate builds the gzipped ring archive and the bare Devicelog for cfg,
 // seeded from sampleLines (the redacted real corpus) plus per-module
 // synthetic filler and the scenario's fault-signature line.
@@ -91,6 +120,7 @@ func Generate(cfg Config, sampleLines []string) (archive []byte, deviceLog []byt
 	seq := fmt.Sprintf("%010d", 1)
 	scenarioLine := seq + " " + cfg.PowerOnAt.Format("2006-01-02 15:04:05.000") + " " + scenarioLines[scenario]
 
+	sampleLines = rewriteIdentity(sampleLines, cfg)
 	lines := make([]string, 0, len(sampleLines)+len(syntheticLines(cfg))+1)
 	lines = append(lines, scenarioLine)
 	lines = append(lines, sampleLines...)

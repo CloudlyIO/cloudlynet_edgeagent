@@ -130,21 +130,23 @@ The testsuite container mocks the CloudlyNet `/v1/agent/**` cloud on port `9000`
 
 ## Live Platform Validation
 
-Use `EDGEAGENT_TESTSUITE_MODE=acsftp` when CloudlyNet/NetAI is already deployed and only the local CWMP device + FTP should be mocked (the agent talks to a real cloud). The testsuite health endpoint remains on `9000`, but `/v1/agent/**` is not mocked in this mode.
+The second way to run the suite: `EDGEAGENT_TESTSUITE_MODE=acsftp` mocks only the local CWMP device +
+FTP and points the agent at an **already-deployed** cloud (the mock `/v1/agent/**` is off; health stays
+on `9000`). Unlike the `make` gate above, this is a manual `docker compose up` driven by `.env`:
 
 ```bash
-EDGEAGENT_TESTSUITE_MODE=acsftp \
-CLOUDLYNET_ENROLLMENT_TOKEN='<enrollment-token>' \
-docker compose -f docker-compose.test.yml up -d --build cloudlynet-edgeagent-testsuite cloudlynet-edgeagent
+cp .env.example .env
+# edit .env: set CLOUDLYNET_ENROLLMENT_TOKEN (dashboard "add device"); MODE is already acsftp
+docker compose -f docker-compose.test.yml up -d --build cloudlynet-edgeagent-testsuite cloudlynet-edgeagent ftp ftp-init
 
 curl http://localhost:9000/health
 docker compose -f docker-compose.test.yml logs -f cloudlynet-edgeagent
 ```
 
-Production enrollment tokens should embed `https://netai.cloudly.io/`. If you are validating an
-older token that still contains `http://localhost:8080`, temporarily add
-`CLOUDLYNET_BASE_URL='https://netai.cloudly.io/'` to the command above; regenerate the edge key in
-the dashboard after SMO Sim is deployed with the corrected `PUBLIC_BASE_URL`.
+Production enrollment tokens should embed `https://netai.cloudly.io/` (the `.env.example` default). If
+you validate an older token that still contains `http://localhost:8080`, set `CLOUDLYNET_BASE_URL` in
+`.env`; regenerate the edge key in the dashboard after SMO Sim is deployed with the corrected
+`PUBLIC_BASE_URL`. Full option list: [`testsuite/README.md`](testsuite/README.md).
 
 ## Migration from GenieACS (on-box, server-side only — no device change)
 
