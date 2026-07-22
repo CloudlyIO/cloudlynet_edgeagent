@@ -84,8 +84,11 @@ verbose_block() { # idx total scenario json pass
 
 run_one() { # idx total scenario -> 0 pass / 1 fail
   local idx="$1" tot="$2" s="$3" h="" i pass=0
-  docker compose down -v >/dev/null 2>&1 || true
-  if ! EDGEAGENT_TESTSUITE_SCENARIO="$s" docker compose up -d --build >/dev/null 2>&1; then
+  # --env-file /dev/null: this IS the self-contained mock-cloud gate — ignore any
+  # user .env (e.g. an acsftp/real-cloud one that sets CLOUDLYNET_BASE_URL/token),
+  # so the agent uses the compose defaults (mock cloud :9000, full mode, dev token).
+  docker compose --env-file /dev/null down -v >/dev/null 2>&1 || true
+  if ! EDGEAGENT_TESTSUITE_SCENARIO="$s" docker compose --env-file /dev/null up -d --build >/dev/null 2>&1; then
     printf ' [%s/%s] %-16s FAIL   docker compose up failed\n' "$idx" "$tot" "$s"
     return 1
   fi
@@ -135,7 +138,7 @@ main() {
       idx=$((idx + 1))
       run_one "$idx" "$total" "$s" || failed=$((failed + 1))
     done
-    docker compose down -v >/dev/null 2>&1 || true
+    docker compose --env-file /dev/null down -v >/dev/null 2>&1 || true
     footer
     echo " ─────────────────────────────────────────────────"
     if [ "$failed" -eq 0 ]; then
@@ -153,7 +156,7 @@ main() {
   fi
   local rc=0
   run_one 1 1 "$arg" || rc=1
-  docker compose down -v >/dev/null 2>&1 || true
+  docker compose --env-file /dev/null down -v >/dev/null 2>&1 || true
   return $rc
 }
 
