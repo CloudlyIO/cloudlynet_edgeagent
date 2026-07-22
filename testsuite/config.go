@@ -33,7 +33,10 @@ func defaultNanolinkConfig() nanolinkConfig {
 	var cfg nanolinkConfig
 	cfg.Identity.OUI = "8C1F64"
 	cfg.Identity.ProductClass = "ENB-N03002-B3"
-	cfg.Identity.Serial = "2205600282"
+	// Synthetic serial: cwmp_id (OUI-ProductClass-Serial) is UNIQUE per tenant on
+	// the real cloud, so a real device's serial collides in acsftp. Override
+	// per-tester via NANOLINK_SERIAL; no effect in full mode.
+	cfg.Identity.Serial = "2205609999"
 	cfg.FTP.Host = "ftp"
 	cfg.FTP.User = "nybsys"
 	cfg.FTP.Pass = ""
@@ -60,9 +63,13 @@ func loadNanolinkConfig(path string) (nanolinkConfig, error) {
 }
 
 // withEnvOverrides applies the same env-var knobs docker-compose.test.yml already
-// wires (FTP_HOST/FTP_USER/FTP_PASS/NANOLINK_SCENARIO), taking precedence over
-// the .conf — consistent with this file's env-first convention elsewhere.
+// wires (FTP_HOST/FTP_USER/FTP_PASS/NANOLINK_SCENARIO/NANOLINK_SERIAL), taking
+// precedence over the .conf — consistent with this file's env-first convention.
 func (c nanolinkConfig) withEnvOverrides() nanolinkConfig {
+	// Per-tester serial → distinct cwmp_ids for concurrent acsftp runs.
+	if v := os.Getenv("NANOLINK_SERIAL"); v != "" {
+		c.Identity.Serial = v
+	}
 	if v := os.Getenv("FTP_HOST"); v != "" {
 		c.FTP.Host = v
 	}

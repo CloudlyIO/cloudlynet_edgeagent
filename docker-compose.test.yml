@@ -61,6 +61,8 @@ services:
       # One of: happy | ftp-path-reject | ftp-auth-fail | ftp-conn-fail |
       # ftp-timeout | atc-fault | reboot (see testsuite/README.md).
       NANOLINK_SCENARIO: ${EDGEAGENT_TESTSUITE_SCENARIO:-happy}
+      # Per-tester serial for acsftp (distinct cwmp_ids). Empty = conf default.
+      NANOLINK_SERIAL: ${EDGEAGENT_TESTSUITE_SERIAL:-}
     ports:
       - "${EDGEAGENT_TESTSUITE_PORT:-9000}:9000"
     depends_on:

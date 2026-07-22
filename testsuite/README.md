@@ -198,18 +198,26 @@ Optional file `conf/nanolink.conf` (all fields default; env vars win over the fi
 | ------------------------ | --------------- | ------------------- |
 | `identity.oui`           | `8C1F64`        | —                   |
 | `identity.product_class` | `ENB-N03002-B3` | —                   |
-| `identity.serial`        | `2205600282`    | —                   |
+| `identity.serial`        | `2205609999`    | `NANOLINK_SERIAL`   |
 | `ftp.host`               | `ftp`           | `FTP_HOST`          |
 | `ftp.user`               | `nybsys`        | `FTP_USER`          |
 | `ftp.pass`               | _(empty)_       | `FTP_PASS`          |
 | `ftp.upload_interval`    | `60s`           | —                   |
 | `scenario`               | `happy`         | `NANOLINK_SCENARIO` |
 
+> **Why the serial is synthetic.** `cwmp_id = OUI-ProductClass-Serial` is UNIQUE per tenant on the
+> real cloud, so reusing a *real* device's serial makes an `acsftp` run collide with that device's
+> cell (your heartbeat updates it instead of creating one under your edge → nothing shows on the
+> dashboard). Default `2205609999` is test-only; set `NANOLINK_SERIAL` per-tester when sharing a
+> cloud. Full mode is unaffected (mock cloud has no unique constraint). The corpus's inline serial is
+> log *content* only — attribution keys off the upload filename, which uses the configured serial.
+
 Compose-level overrides (all optional, with defaults):
 
 | Env var                        | Default                        | Effect                                       |
 | ------------------------------ | ------------------------------ | -------------------------------------------- |
 | `EDGEAGENT_TESTSUITE_SCENARIO` | `happy`                        | selects the scenario (→ `NANOLINK_SCENARIO`) |
+| `EDGEAGENT_TESTSUITE_SERIAL`   | _(empty → conf default)_       | device serial for acsftp (→ `NANOLINK_SERIAL`) |
 | `EDGEAGENT_TESTSUITE_PORT`     | `9000`                         | host port for the mock cloud / `/health`     |
 | `EDGEAGENT_TESTSUITE_MODE`     | `full`                         | `full` / `acs` / `acsftp` (see Debug modes)  |
 | `EDGEAGENT_CWMP_PORT`          | `7547`                         | host port for the agent's CWMP ACS           |
