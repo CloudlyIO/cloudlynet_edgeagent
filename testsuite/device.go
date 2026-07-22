@@ -1,8 +1,9 @@
 // Mock NanoLink CWMP device: dials the agent's in-agent ACS at :7547 on a fast
-// loop (Inform -> GetRPCMethods -> TransferComplete -> ATC -> drain the queued
-// GPV/SPV/GPN/Reboot), answering each ACS task from its manifest-seeded param
-// store. The SOAP envelopes it sends/returns live in soap.go. Device identity is
-// config-driven and shared package-wide (set once in main()).
+// loop (Inform -> GetRPCMethods -> TransferComplete -> [ATC when a transfer
+// completed] -> drain the queued GPV/SPV/GPN/Reboot), answering each ACS task
+// from its manifest-seeded param store. The SOAP envelopes it sends/returns live
+// in soap.go. Device identity is config-driven and shared package-wide (set once
+// in main()).
 package main
 
 import (
@@ -31,6 +32,7 @@ type device struct {
 	mu          sync.Mutex
 	params      map[string]string
 	informsSent int64
+	pendingXfer int64
 }
 
 // newDevice seeds the mock device's entire param store from the NanoLink
@@ -73,6 +75,25 @@ func (d *device) informs() int64 {
 	return atomic.LoadInt64(&d.informsSent)
 }
 
+// markTransfer records a completed autonomous file transfer (a log upload).
+// runSession emits one ATC per recorded transfer, so ATC cadence tracks real
+// uploads (~60s) instead of firing on every CWMP session — matching a real
+// device, which only ATCs when it actually finishes uploading a file.
+func (d *device) markTransfer() { atomic.AddInt64(&d.pendingXfer, 1) }
+
+// takeTransfer consumes one pending transfer, reporting whether an ATC is due.
+func (d *device) takeTransfer() bool {
+	for {
+		n := atomic.LoadInt64(&d.pendingXfer)
+		if n <= 0 {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&d.pendingXfer, n, n-1) {
+			return true
+		}
+	}
+}
+
 func runConnRequestListener(addr string, dialNow chan<- struct{}) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -106,10 +127,10 @@ func runDeviceLoop(agentURL string, dev *device, dialNow <-chan struct{}, m *man
 const maxSessionTasks = 64
 
 // runSession performs one CWMP session against the agent: Inform -> GetRPCMethods
-// -> TransferComplete -> ATC -> drain the ACS's queued tasks -> 204. GetRPCMethods
-// and TransferComplete are device-initiated notifications the agent's CWMP
-// session already answers (session.go); sending them exercises that surface
-// without disturbing the task-queue drain loop below.
+// -> TransferComplete -> (ATC only when a transfer completed) -> drain the ACS's
+// queued tasks -> 204. GetRPCMethods and TransferComplete are device-initiated
+// notifications the agent's CWMP session already answers (session.go); sending
+// them exercises that surface without disturbing the task-queue drain loop below.
 func runSession(client *http.Client, agentURL string, dev *device, m *manifest) {
 	msgID := nextMsgID()
 	if _, ok := post(client, agentURL, informEnvelope(msgID, dev)); !ok {
@@ -120,9 +141,13 @@ func runSession(client *http.Client, agentURL string, dev *device, m *manifest) 
 	post(client, agentURL, getRPCMethodsEnvelope(msgID))
 	post(client, agentURL, transferCompleteEnvelope(msgID))
 
-	atc, _ := post(client, agentURL, atcEnvelope(msgID))
-	if strings.Contains(strings.ToLower(atc), "fault") {
-		log.Printf("REGRESSION: agent answered AutonomousTransferComplete with a Fault:\n%s", atc)
+	// ATC only when a log upload actually completed (see device.markTransfer),
+	// so we don't announce a transfer every 500ms session like the old loop did.
+	if dev.takeTransfer() {
+		atc, _ := post(client, agentURL, atcEnvelope(msgID))
+		if strings.Contains(strings.ToLower(atc), "fault") {
+			log.Printf("REGRESSION: agent answered AutonomousTransferComplete with a Fault:\n%s", atc)
+		}
 	}
 
 	for i := 0; i < maxSessionTasks; i++ {

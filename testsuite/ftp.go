@@ -72,6 +72,11 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 		// scenarios meant to prove it.
 		if err := curlUpload(cfg.host, cfg.user, cfg.pass, archive, "/"+genCfg.ArchiveName()); err != nil {
 			log.Printf("ftp archive upload failed: %v", err)
+		} else {
+			// A real transfer completed -> the device is now due to announce it
+			// over CWMP (ATC). runSession emits exactly one ATC per mark, so ATCs
+			// track uploads (~60s) rather than every 500ms session.
+			dev.markTransfer()
 		}
 		if err := curlUpload(cfg.host, cfg.user, cfg.pass, deviceLog, "/"+genCfg.DeviceLogName()); err != nil {
 			log.Printf("ftp devicelog upload failed: %v", err)
