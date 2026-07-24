@@ -62,6 +62,29 @@ func writeBareLog(t *testing.T, dir, name string, lines []string) string {
 	return full
 }
 
+// writeGzipLog builds a single-file gzip log — the routine periodic-feed shape
+// (Log_*.gz / ErrorLog_*.gz): NOT a tar, just gzipped "<seq> <ts> [MODULE] <msg>"
+// lines, exactly like a real NanoLink's ~60s VendorLog upload.
+func writeGzipLog(t *testing.T, dir, name string, lines []string) string {
+	t.Helper()
+	full := filepath.Join(dir, name)
+	f, err := os.Create(full)
+	if err != nil {
+		t.Fatalf("create gzip log: %v", err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	for _, l := range lines {
+		if _, err := gz.Write([]byte(l + "\n")); err != nil {
+			t.Fatalf("gzip write: %v", err)
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return full
+}
+
 func newTestCollector(t *testing.T, ftpDir string, onboard bool) *Collector {
 	t.Helper()
 	buf, err := buffer.Open(":memory:", 0)
@@ -81,15 +104,16 @@ func newTestCollector(t *testing.T, ftpDir string, onboard bool) *Collector {
 	return New(acs, rules.DefaultEngine(), ftpDir)
 }
 
-// TestScanFTPRealArchiveRoutesModuleAndDeviceID is the A+B compound regression
-// guard: a real-shaped ring .tgz (numbered entries, inline [MODULE] lines)
-// must classify to typed events (not UNKNOWN) keyed on the canonical device
-// id (not the bare OUI "8C1F64" a first-`_` split would yield).
-func TestScanFTPRealArchiveRoutesModuleAndDeviceID(t *testing.T) {
+// TestEventsFromArchiveReaderClassifies covers the PARKED reboot-dump reader
+// (eventsFromArchive): the .tgz dispatch is commented out in parseUpload pending
+// the ingestion revamp, but the reader itself must still route the module per
+// line and classify, so re-enabling it later is safe. Real-shaped ring entries
+// (numbered 1…10, inline [MODULE]) → typed events, never UNKNOWN.
+func TestEventsFromArchiveReaderClassifies(t *testing.T) {
 	dir := t.TempDir()
 	c := newTestCollector(t, dir, true)
 
-	writeRingArchive(t, dir, testOUI+"_"+testSerial+"_PowerOn_20240602_235010_continuouslogging.tgz", map[string][]string{
+	path := writeRingArchive(t, dir, testOUI+"_"+testSerial+"_PowerOn_20240602_235010_continuouslogging.tgz", map[string][]string{
 		"1": {
 			"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)",
 			"0000000030 2024-06-02 07:07:38.097 [TR69] RPC Unknown received from ACS",
@@ -98,53 +122,63 @@ func TestScanFTPRealArchiveRoutesModuleAndDeviceID(t *testing.T) {
 		"max":   {"10"},
 	})
 
-	c.scanFTP()
-	events := c.DrainEvents()
+	events, err := c.eventsFromArchive(path, testCanonicalID)
+	if err != nil {
+		t.Fatalf("eventsFromArchive: %v", err)
+	}
 	if len(events) != 2 {
 		t.Fatalf("events = %d, want 2: %+v", len(events), events)
 	}
-	byType := map[string]string{}
+	byType := map[string]struct{}{}
 	for _, e := range events {
-		byType[e.EventType] = e.CWMPID
 		if e.EventType == "unclassified" {
 			t.Fatalf("event fell through to unclassified (module routing broken): %+v", e)
 		}
+		byType[e.EventType] = struct{}{}
 	}
 	for _, want := range []string{"ftp_upload_ok", "atc_fault_loop"} {
-		device, ok := byType[want]
-		if !ok {
+		if _, ok := byType[want]; !ok {
 			t.Fatalf("missing typed event %q; got %+v", want, byType)
-		}
-		if device != testCanonicalID {
-			t.Errorf("event %q device = %q, want canonical %q (not bare OUI)", want, device, testCanonicalID)
-		}
-		if device == testOUI {
-			t.Errorf("event %q mis-keyed to bare OUI %q — B fix regressed", want, testOUI)
 		}
 	}
 }
 
-// TestScanFTPBareDevicelogIngested guards bare-Devicelog ingestion: a bare
-// "*_Devicelog" upload (no .tgz) must be picked up by scanFTP's glob and have
-// its inline-tagged lines classified — not silently dropped by a .tgz-only filter.
-func TestScanFTPBareDevicelogIngested(t *testing.T) {
+// TestScanFTPSkipsParkedShapes proves the PARKED reboot-dump .tgz and bare
+// Devicelog are NOT ingested via scanFTP while their isLogUpload/parseUpload
+// dispatch is commented out — a guard so the parking can't silently regress.
+func TestScanFTPSkipsParkedShapes(t *testing.T) {
 	dir := t.TempDir()
 	c := newTestCollector(t, dir, true)
-
+	writeRingArchive(t, dir, testOUI+"_"+testSerial+"_PowerOn_20240602_235010_continuouslogging.tgz", map[string][]string{
+		"1": {"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)"},
+	})
 	writeBareLog(t, dir, testOUI+"_"+testSerial+"_PowerOn_20240602_235010_Devicelog", []string{
 		"0000000096 2024-06-02 17:45:11.106 [FM] Critical alarm 0x16010400 raised, system reboot will be taken to recover it after 90s.",
 	})
 
 	c.scanFTP()
-	events := c.DrainEvents()
-	if len(events) != 1 {
-		t.Fatalf("events = %d, want 1: %+v", len(events), events)
+	if events := c.DrainEvents(); len(events) != 0 {
+		t.Fatalf("parked .tgz/Devicelog must not be ingested via scanFTP; got %+v", events)
 	}
-	if events[0].EventType != "device_reboot" {
-		t.Fatalf("EventType = %q, want device_reboot", events[0].EventType)
+}
+
+// TestEventsFromLogReaderClassifies covers the PARKED bare-Devicelog reader
+// (eventsFromLog): its scanFTP dispatch is commented out pending the ingestion
+// revamp, but the reader must still classify its inline-tagged lines.
+func TestEventsFromLogReaderClassifies(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCollector(t, dir, true)
+
+	path := writeBareLog(t, dir, testOUI+"_"+testSerial+"_PowerOn_20240602_235010_Devicelog", []string{
+		"0000000096 2024-06-02 17:45:11.106 [FM] Critical alarm 0x16010400 raised, system reboot will be taken to recover it after 90s.",
+	})
+
+	events, err := c.eventsFromLog(path, testCanonicalID)
+	if err != nil {
+		t.Fatalf("eventsFromLog: %v", err)
 	}
-	if events[0].CWMPID != testCanonicalID {
-		t.Errorf("CWMPID = %q, want %q", events[0].CWMPID, testCanonicalID)
+	if len(events) != 1 || events[0].EventType != "device_reboot" {
+		t.Fatalf("want 1 device_reboot event; got %+v", events)
 	}
 }
 
@@ -199,10 +233,9 @@ func TestScanFTPDefersUnknownDeviceThenExhausts(t *testing.T) {
 	dir := t.TempDir()
 	c := newTestCollector(t, dir, false) // device NOT onboarded
 
-	path := testOUI + "_" + testSerial + "_PowerOn_20240602_235010_continuouslogging.tgz"
-	writeRingArchive(t, dir, path, map[string][]string{
-		"1": {"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)"},
-	})
+	// Periodic-feed fixture (the .tgz path is parked); deferral is shape-agnostic.
+	path := "Log_20240602.2311+0800_" + testOUI + "." + testSerial + ".gz"
+	writeGzipLog(t, dir, path, []string{"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)"})
 
 	for i := 0; i < maxDeferTicks-1; i++ {
 		c.scanFTP()
@@ -241,6 +274,110 @@ func TestScanFTPDefersUnknownDeviceThenExhausts(t *testing.T) {
 	}
 }
 
+// TestScanFTPPeriodicLogGzIngested guards the routine periodic feed (#346
+// tweak): a single-file-gzip "Log_<date>.<time>+<tz>_<OUI>.<serial>.gz" (NOT a
+// .tgz, NOT a bare Devicelog) must be picked up by scanFTP, its inline-[MODULE]
+// lines classified to typed events, and keyed on the canonical device id
+// resolved from the dot-joined OUI.serial TAIL — the shape a leading-`_` split
+// would mis-parse as oui="Log".
+func TestScanFTPPeriodicLogGzIngested(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCollector(t, dir, true)
+
+	writeGzipLog(t, dir, "Log_20240602.2311+0800_"+testOUI+"."+testSerial+".gz", []string{
+		"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)",
+		"0000000030 2024-06-02 07:07:38.097 [TR69] RPC Unknown received from ACS",
+	})
+
+	c.scanFTP()
+	events := c.DrainEvents()
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2: %+v", len(events), events)
+	}
+	byType := map[string]string{}
+	for _, e := range events {
+		if e.EventType == "unclassified" {
+			t.Fatalf("event fell through to unclassified (module routing broken): %+v", e)
+		}
+		byType[e.EventType] = e.CWMPID
+	}
+	for _, want := range []string{"ftp_upload_ok", "atc_fault_loop"} {
+		device, ok := byType[want]
+		if !ok {
+			t.Fatalf("missing typed event %q; got %+v", want, byType)
+		}
+		if device != testCanonicalID {
+			t.Errorf("event %q device = %q, want canonical %q (periodic-shape id resolution regressed)", want, device, testCanonicalID)
+		}
+	}
+}
+
+// TestScanFTPErrorLogGzIngested guards the error-slice sibling of the periodic
+// feed: "ErrorLog_*.gz" is a distinct filename prefix but the same single-file
+// gzip shape, and must ingest + classify identically to Log_*.gz.
+func TestScanFTPErrorLogGzIngested(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCollector(t, dir, true)
+
+	writeGzipLog(t, dir, "ErrorLog_20240613.1758+0800_"+testOUI+"."+testSerial+".gz", []string{
+		"0000000121 2024-06-13 17:58:39.035 [FM] Critical alarm 0x16010400 raised, system reboot will be taken to recover it after 90s.",
+	})
+
+	c.scanFTP()
+	events := c.DrainEvents()
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(events), events)
+	}
+	if events[0].EventType != "device_reboot" {
+		t.Fatalf("EventType = %q, want device_reboot", events[0].EventType)
+	}
+	if events[0].CWMPID != testCanonicalID {
+		t.Errorf("CWMPID = %q, want %q", events[0].CWMPID, testCanonicalID)
+	}
+}
+
+// TestOUISerialFromNameBothShapes locks the dual-shape filename parse: the
+// reboot-dump/alarm "<OUI>_<serial>_PowerOn_…" shape AND the periodic
+// "Log_/ErrorLog_<date>.<time>+<tz>_<OUI>.<serial>.gz" shape both yield the
+// device's OUI+serial (the periodic tail is dot-joined in the LAST _-token).
+func TestOUISerialFromNameBothShapes(t *testing.T) {
+	cases := []struct{ name, oui, serial string }{
+		{"8C1F64_2205600282_PowerOn_20240602_235010_continuouslogging.tgz", "8C1F64", "2205600282"},
+		{"8C1F64_2205600282_PowerOn_20240602_235010_Devicelog", "8C1F64", "2205600282"},
+		{"Log_20240602.2311+0800_8C1F64.2205600282.gz", "8C1F64", "2205600282"},
+		{"ErrorLog_20240613.1758+0800_8C1F64.2205600282.gz", "8C1F64", "2205600282"},
+	}
+	for _, tc := range cases {
+		oui, serial := ouiSerialFromName(tc.name)
+		if oui != tc.oui || serial != tc.serial {
+			t.Errorf("ouiSerialFromName(%q) = (%q, %q), want (%q, %q)", tc.name, oui, serial, tc.oui, tc.serial)
+		}
+	}
+}
+
+// TestPeriodicLogAndErrorLogShareDedupKey proves the Log∩ErrorLog overlap
+// collapses: the SAME raw alarm line delivered via both a Log_*.gz and an
+// ErrorLog_*.gz yields the same content-derived DedupKey, so the cloud's
+// ON CONFLICT(dedup_key) counts it once — matching the real device, which logs an
+// alarm to both the operational feed and the error slice.
+func TestPeriodicLogAndErrorLogShareDedupKey(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCollector(t, dir, true)
+	const alarm = "0000000121 2024-06-13 17:58:39.035 [FM] Critical alarm 0x16010400 raised, system reboot will be taken to recover it after 90s."
+
+	writeGzipLog(t, dir, "Log_20240613.1758+0800_"+testOUI+"."+testSerial+".gz", []string{alarm})
+	writeGzipLog(t, dir, "ErrorLog_20240613.1758+0800_"+testOUI+"."+testSerial+".gz", []string{alarm})
+
+	c.scanFTP()
+	events := c.DrainEvents()
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2 (one per file, pre-cloud-dedup): %+v", len(events), events)
+	}
+	if events[0].DedupKey == "" || events[0].DedupKey != events[1].DedupKey {
+		t.Errorf("DedupKey mismatch across Log/ErrorLog for identical raw: %q vs %q", events[0].DedupKey, events[1].DedupKey)
+	}
+}
+
 // TestScanFTPColdStartRace: the log arrives before Inform, then the device
 // onboards — the deferred upload must land on the correct device once known,
 // not the unresolved sentinel.
@@ -248,10 +385,9 @@ func TestScanFTPColdStartRace(t *testing.T) {
 	dir := t.TempDir()
 	c := newTestCollector(t, dir, false)
 
-	path := testOUI + "_" + testSerial + "_PowerOn_20240602_235010_continuouslogging.tgz"
-	writeRingArchive(t, dir, path, map[string][]string{
-		"1": {"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)"},
-	})
+	// Periodic-feed fixture (the .tgz path is parked); cold-start race is shape-agnostic.
+	path := "Log_20240602.2311+0800_" + testOUI + "." + testSerial + ".gz"
+	writeGzipLog(t, dir, path, []string{"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)"})
 
 	c.scanFTP()
 	if events := c.DrainEvents(); len(events) != 0 {

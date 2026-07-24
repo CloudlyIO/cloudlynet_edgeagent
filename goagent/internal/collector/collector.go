@@ -81,6 +81,11 @@ const maxDeferTicks = 30
 // corrupt file is eventually abandoned instead of re-parsed forever.
 const maxParseRetries = 5
 
+// maxLogBytes bounds the decompressed size read from a single-file gzip periodic
+// log (Log_*.gz / ErrorLog_*.gz) — generous for the tiny real slices (KB) while
+// capping a malformed/hostile gzip from ballooning memory.
+const maxLogBytes = 8 << 20
+
 // Collector reads device state from the in-agent CWMP ACS (params cached from
 // Informs + GPV responses) and parses NanoLink FTP log archives into events.
 type Collector struct {
@@ -285,19 +290,52 @@ func (c *Collector) markSeen(path string) {
 	delete(c.parseFails, path)
 }
 
-// isLogUpload matches the two real NanoLink upload shapes: the gzipped ring
-// archive and the bare (uncompressed, no .tgz) Devicelog alarm log.
+// isLogUpload matches the NanoLink FTP upload shapes the agent ingests. At
+// present that is ONLY the routine ~60s periodic feed:
+//   - "Log_<date>.<time>+<tz>_<OUI>.<serial>.gz"
+//   - "ErrorLog_<date>.<time>+<tz>_<OUI>.<serial>.gz"  (error-slice sibling)
+//
+// PARKED (#346 follow-up — ingestion revamp): the reboot/power-on ring dump
+// ("<OUI>_<serial>_PowerOn_<ts>_continuouslogging.tgz") and the bare Devicelog
+// alarm log are no longer emitted by the emulator, and their intake is deferred
+// to the ingestion revamp (which will settle the full upload taxonomy: live feed
+// vs on-demand ring backfill vs forensic artifacts). The `.tgz`/`_Devicelog`
+// check below — together with the matching branches in parseUpload and the
+// eventsFromArchive/eventsFromLog readers — is intentionally commented out so a
+// real box's reboot dump is currently NOT ingested. Re-enable all of them
+// together when the revamp lands. See docs task notes.md.
 func isLogUpload(name string) bool {
-	return strings.HasSuffix(name, ".tgz") || strings.HasSuffix(name, "_Devicelog")
+	// if strings.HasSuffix(name, ".tgz") || strings.HasSuffix(name, "_Devicelog") {
+	// 	return true
+	// }
+	return isPeriodicLog(name)
 }
 
-// parseUpload dispatches to the tar/gzip or bare-log reader by file shape; both
-// share the same already-resolved deviceID (the parser never re-resolves).
+// isPeriodicLog reports whether name is a routine periodic-feed upload
+// (Log_*.gz / ErrorLog_*.gz): a single-file gzip, distinct from the .tgz ring.
+// Matched by BOTH the Log_/ErrorLog_ prefix AND the .gz suffix — never a bare
+// ".gz" — so forensic dump artifacts that also end in .gz (e.g. "…_fsm.log.gz")
+// are not swept in.
+func isPeriodicLog(name string) bool {
+	return strings.HasSuffix(name, ".gz") &&
+		(strings.HasPrefix(name, "Log_") || strings.HasPrefix(name, "ErrorLog_"))
+}
+
+// parseUpload reads the upload with the already-resolved deviceID (the parser
+// never re-resolves). Only the routine periodic feed (single-file gzip) is
+// handled at present; the ".tgz" ring-dump and bare "Devicelog" branches are
+// PARKED (see isLogUpload) — commented out here and re-enabled by the ingestion
+// revamp alongside the eventsFromArchive/eventsFromLog readers.
 func (c *Collector) parseUpload(path, deviceID string) ([]cloud.EventItem, error) {
-	if strings.HasSuffix(path, ".tgz") {
-		return c.eventsFromArchive(path, deviceID)
-	}
-	return c.eventsFromLog(path, deviceID)
+	// switch {
+	// case strings.HasSuffix(path, ".tgz"):
+	// 	return c.eventsFromArchive(path, deviceID)
+	// case isPeriodicLog(filepath.Base(path)):
+	// 	return c.eventsFromGzipLog(path, deviceID)
+	// default:
+	// 	return c.eventsFromLog(path, deviceID)
+	// }
+	return c.eventsFromGzipLog(path, deviceID)
 }
 
 // resolveDeviceID resolves a real NanoLink upload's canonical device id via
@@ -325,10 +363,27 @@ func (c *Collector) resolveDeviceID(path string) (canonicalID string, known bool
 	return "", false
 }
 
-// ouiSerialFromName splits a real upload filename's leading OUI_serial
-// tokens, e.g. "8C1F64_2205600282_PowerOn_20240602_235010_continuouslogging.tgz".
+// ouiSerialFromName extracts OUI+serial from a real upload filename, handling
+// both real shapes:
+//   - reboot dump / alarm log "<OUI>_<serial>_PowerOn_…": the leading two
+//     _-tokens ("8C1F64_2205600282_PowerOn_…_continuouslogging.tgz").
+//   - periodic feed "Log_<date>.<time>+<tz>_<OUI>.<serial>.gz": the OUI.serial
+//     pair is the LAST _-token, dot-joined ("…_8C1F64.2205600282.gz"). A
+//     leading-_-split would wrongly yield oui="Log" here — hence the shape split.
 func ouiSerialFromName(path string) (oui, serial string) {
-	base := strings.TrimSuffix(filepath.Base(path), ".tgz")
+	base := filepath.Base(path)
+	if isPeriodicLog(base) {
+		tail := strings.TrimSuffix(base, ".gz")
+		if i := strings.LastIndexByte(tail, '_'); i >= 0 {
+			tail = tail[i+1:] // "8C1F64.2205600282"
+		}
+		o, s, ok := strings.Cut(tail, ".")
+		if !ok {
+			return "", ""
+		}
+		return o, s
+	}
+	base = strings.TrimSuffix(base, ".tgz")
 	parts := strings.SplitN(base, "_", 3)
 	if len(parts) < 2 {
 		return "", ""
@@ -344,6 +399,10 @@ func unresolvedID(path string) string {
 	return "unresolved:" + oui + "_" + serial
 }
 
+// eventsFromArchive reads the gzip-tar reboot/power-on ring dump (numbered
+// entries 1…10/index/max). PARKED (#346 follow-up): its parseUpload dispatch is
+// commented out pending the ingestion revamp; the reader is kept + unit-tested
+// (TestEventsFromArchiveReaderClassifies) so re-enabling it later stays safe.
 func (c *Collector) eventsFromArchive(path, deviceID string) ([]cloud.EventItem, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -377,9 +436,35 @@ func (c *Collector) eventsFromArchive(path, deviceID string) ([]cloud.EventItem,
 	}
 }
 
+// eventsFromGzipLog handles the routine periodic feed (Log_*.gz / ErrorLog_*.gz):
+// a single gzip-compressed log file — NOT a tar — carrying the same
+// "<seq> <ts> [MODULE] <msg>" line format as the ring entries. A truncated read
+// (a file caught mid-STOR) returns an error so scanFTP's bounded retry re-attempts
+// it rather than dropping it after one gunzip failure.
+func (c *Collector) eventsFromGzipLog(path, deviceID string) ([]cloud.EventItem, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	b, err := io.ReadAll(io.LimitReader(gz, maxLogBytes))
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(b), "\n")
+	return c.rules.Apply(lines, deviceID), nil
+}
+
 // eventsFromLog handles a bare (non-archive) upload — the real Devicelog,
 // which carries the same "<seq> <ts> [MODULE] <msg>" line format as the ring
 // archive entries but is uploaded uncompressed with no .tgz extension.
+// PARKED (#346 follow-up): its parseUpload dispatch is commented out pending the
+// ingestion revamp; the reader is kept + unit-tested (TestEventsFromLogReaderClassifies).
 func (c *Collector) eventsFromLog(path, deviceID string) ([]cloud.EventItem, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

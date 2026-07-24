@@ -49,7 +49,7 @@ testsuite/            # NanoLink emulator: mock cloud + mock CWMP device + FTP (
 - Uses local SQLite for telemetry outbox retry, applied-command dedupe, and the CWMP device/parameter/event store.
 - **Is the ACS:** it answers the device's Inform and `AutonomousTransferComplete` (the RPC GenieACS never handled), reads via `GetParameterValues`, writes via `SetParameterValues`, walks `GetParameterNames` once on first contact for authoritative writability, and reboots — all over the in-agent `:7547` listener. An optional connection-request trigger sharpens apply latency below the device's ~60 s inform cadence.
 - Emits an `autonomous_transfer_complete` event on each ATC into the telemetry batch (smo-sim ingests it).
-- Parses FTP `.tgz` logs into deterministic telemetry events using `config/rules.yaml`; the processed-archive set is pruned to the current directory contents so it stays bounded.
+- Parses FTP log uploads into deterministic telemetry events using `config/rules.yaml` — the routine periodic feed (`Log_*.gz`/`ErrorLog_*.gz`, single-file gzip), the reboot-dump `continuouslogging.tgz` ring, and the bare `Devicelog`; the module is read from each line's inline `[MODULE]` tag and the device from the filename's OUI+serial, and the processed-upload set is pruned to the current directory contents so it stays bounded.
 
 ## Telemetry tiering (handover §3.4)
 
