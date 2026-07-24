@@ -17,9 +17,9 @@ error-weighted sibling:
 
 > **Why not `continuouslogging.tgz` + `Devicelog`?** Those are the device's **reboot/power-on dump**
 > (a whole 10-slot ring tarred) and its bare alarm log — episodic, not routine. The emulator used to
-> emit them; it now emits the **routine feed** a real box actually pushes every minute. The agent still
-> ingests all shapes (`.tgz`, bare `Devicelog`, and `Log_*.gz`/`ErrorLog_*.gz`); only the emulator's
-> routine emission changed. The reboot-dump shapes stay covered by the agent's unit tests.
+> emit them; it now emits the **routine feed** a real box actually pushes every minute. The agent's
+> `.tgz`/`Devicelog` dispatch is currently **parked** (commented out in `collector.go`) pending the
+> ingestion revamp — so it ingests only `Log_*.gz`/`ErrorLog_*.gz`; the parked readers stay unit-tested.
 
 Both carry the same line format:
 
@@ -38,25 +38,32 @@ Both carry the same line format:
 The **filename** carries OUI+serial dot-joined in the last `_`-token (`…_8C1F64.2205600282.gz`); the
 agent resolves the device from that tail (the date/time/tz are cosmetic — the parser ignores them).
 
-## What goes into a generated slice
+## What goes into a generated slice — operational vs incident
 
-`Generate(cfg, sampleLines)` gathers three sources, then lays them into the two artifacts:
+`Generate(cfg, sampleLines)` splits the corpus (via `isErrorLine`) into two streams and lays them out
+by cycle:
 
-1. **The scenario's fault line** — exactly one line, chosen by the selected scenario (below).
-2. **The redacted real sample** — `fixtures/real_sample.log` (see [Fixture](#the-fixture)).
-3. **Synthetic filler** — a few `[NCM]`/`[SM]`/`[SCM]`/`[SON]` lines for module diversity the sample
-   doesn't cover.
+- **Operational stream** (persistent) — the non-error lines: boot/identity, upload *success*, config
+  reads, status, `RPC Unknown` chatter. Emitted **every cycle** into the `Log`, but **jittered**: each
+  line gets an **advancing sequence number + this cycle's timestamp** (so each ~60s slice is a distinct
+  delta, like a real device — not a byte-identical replay), and the upload-log line is **repointed at
+  this cycle's own `Log` filename**.
+- **Incident stream** (bursty) — the error/alarm lines: `curl` failures, ACS failures, the reboot
+  alarm, SCTP/SON faults. Emitted **only during an incident window** (`IsIncidentCycle`), **verbatim**
+  (sticky seq+ts). During a window those lines go into **both** that cycle's `Log` and its `ErrorLog`.
+- **Scenario line** — the selected scenario's one signature line, staged in **every** cycle's `Log`
+  (the guaranteed `/health` signal), plus synthetic `[NCM]`/`[SM]`/`[SCM]` filler.
 
-Layout rules:
+**Incident windows** (`IsIncidentCycle`, cycle-based): baseline-clean first, then a **2-cycle burst**
+recurring every `incidentPeriod` cycles — at a ~60s Log cadence, first burst ~60s in, then ~5 min quiet,
+repeat. This mirrors the real device, which dumps an `ErrorLog` *around an incident*, not on a fixed
+timer (the real archive has 15,907 `Log_*.gz` but only 4 `ErrorLog_*.gz`, clustered in one burst).
 
-- The **`Log_*.gz`** gets **all** the lines — the full operational slice.
-- The **`ErrorLog_*.gz`** gets only the **error/alarm** lines — those whose text carries an
-  `alarm`/`fault`/`fail`/`error` marker (`errorLogLines`, the same predicate the agent's `rules.alarmy`
-  fallback uses). A `curl code=(0)` **success** is not an error, so the happy-path line stays out of
-  the ErrorLog; real background alarms in the corpus keep it non-empty anyway.
-
-Because the ErrorLog's lines are a subset of the Log's, the same alarm arrives via **both** files —
-exactly as on the real device — and the cloud's content-derived dedup key collapses the duplicate.
+**Correlation → dedup.** The incident lines are byte-identical (sticky) in both the `Log` and the
+concurrent `ErrorLog` — and recur identically across windows — so the cloud's content-derived dedup key
+collapses the overlap, exactly as when a real device logs an alarm to both streams. The jittered
+operational lines, by contrast, are fresh every cycle → distinct events. So a run exercises **both**
+fresh-delta ingestion **and** dedup.
 
 ## Scenarios
 
@@ -102,13 +109,19 @@ a fixture or doc. (This feed carries no vendor-ACS public IP — all hosts are t
 ## Fidelity scope (deliberate)
 
 - `Log_*.gz` + `ErrorLog_*.gz` only — the routine feed, not the reboot-dump `continuouslogging.tgz`
-  ring or the hourly variants.
-- A **fixed corpus replayed each cycle** — no live per-minute deltas or ring rotation. (Real
-  consecutive `Log_*.gz` are disjoint deltas; the emulator repeats the same slice, and content-dedup
-  collapses the repeats.)
+  ring or the hourly variants (the agent's dump-shape intake is parked — see `collector.go`).
+- **Operational lines are jittered** (advancing seq + fresh ts) so each cycle is a distinct delta;
+  **incident lines are sticky** for dedup. It is still a *fixed corpus* sampled per cycle — the message
+  *text* repeats (only seq / ts / filename advance), so it's a realistic delta, not fully novel content.
+- **Incident windows are cycle-based** — an approximation of the real rarity/burst, not a reproduction
+  of an incident's actual cause. The fast `make e2e` gate passes on the first (baseline) cycle, so the
+  incident/`ErrorLog` path is exercised by the unit tests + a longer manual `docker compose up` run
+  (watch ~2 min), not by the fast gate.
 - Single device.
 
 ## Tests
 
 `make test-suite` (or `cd testsuite && go test ./...`) covers the filename shapes, the single-file-gzip
-layout, the error-subset split, and that each scenario stages the signature its rule expects.
+layout, the incident-window schedule (`IsIncidentCycle`), the baseline-clean vs incident split, the
+operational-jitter vs sticky-incident dedup anchor, the filename-field touch, and that each scenario
+stages the signature its rule expects.

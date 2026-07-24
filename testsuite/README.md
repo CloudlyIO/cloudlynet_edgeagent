@@ -239,19 +239,23 @@ Compose-level overrides (all optional, with defaults):
 
 ## Log generation
 
-`loggen.Generate` builds the two real **periodic-feed** upload shapes — the ~60s VendorLog stream the
-device pushes every cycle (not the reboot-only `continuouslogging.tgz` dump, which the agent still
-ingests but the emulator no longer emits):
+`loggen.Generate` builds the real **periodic-feed** upload shapes — the ~60s VendorLog stream the
+device pushes (not the reboot-only `continuouslogging.tgz` dump, whose agent intake is parked):
 
-- **`Log_<date>.<time>+<tz>_<OUI>.<serial>.gz`** — a single-file gzip (NOT a tar) of the full
-  operational slice, module living inline as `[FILE_TRANS]`/`[TR69]`/`[FM]`/… on each line.
-- **`ErrorLog_<date>.<time>+<tz>_<OUI>.<serial>.gz`** — the same shape, scoped to the error/alarm
-  subset. Its lines also appear in the `Log` feed; the cloud's content-dedup collapses the overlap.
+- **`Log_<date>.<time>+<tz>_<OUI>.<serial>.gz`** — a single-file gzip (NOT a tar), emitted **every
+  cycle**. Carries the **operational** stream (boot / success / config / status), **jittered** each
+  cycle (advancing seq + fresh ts; the upload-log line references this cycle's own filename) so it's a
+  distinct delta, not a replay.
+- **`ErrorLog_<date>.<time>+<tz>_<OUI>.<serial>.gz`** — same shape, emitted **only during an incident
+  window** (occasional burst; see `loggen.IsIncidentCycle`). Carries the **incident** lines (curl
+  failures / ACS / reboot / SCTP·SON faults) **verbatim** — the same lines also land in that cycle's
+  `Log`, so the cloud's content-dedup collapses the overlap (correlated, like a real device).
 
 Content is a small **redacted real sample** (`fixtures/real_sample.log`) plus **synthetic per-module
-filler** and the scenario's fault line. Fidelity scope: `Log_*.gz` + `ErrorLog_*.gz` only, a fixed
-corpus replayed each cycle (no live per-minute deltas), single device. Real FTP credentials are
-redacted in the fixture — **never commit real credentials.**
+filler** and the scenario's signature line (staged in every `Log`). Fidelity scope: `Log_*.gz` +
+`ErrorLog_*.gz` only; operational lines jittered / incident lines sticky (a fixed corpus — message text
+repeats, seq·ts·filename advance); cycle-based incident windows; single device. Real FTP credentials
+are redacted in the fixture — **never commit real credentials.**
 
 **Full detail — the line format, the two artifacts, the per-scenario staged lines, and the fixture:
 [`loggen/README.md`](loggen/README.md).**

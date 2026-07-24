@@ -45,17 +45,19 @@ type ftpUploadConfig struct {
 
 // runFTPUploadLoop waits for the device to Inform at least once (the agent's
 // device-id resolution depends on cwmp_devices being populated first), then
-// curl-uploads a real-shaped periodic Log_*.gz + ErrorLog_*.gz on the configured
-// cadence, matching the real device's ~60s VendorLog cycle.
+// curl-uploads a real-shaped periodic Log_*.gz every cycle (the ~60s VendorLog
+// feed) and, only during an incident window (see loggen.IsIncidentCycle), the
+// correlated ErrorLog_*.gz — matching the real device's cadence.
 func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 	for dev.informs() == 0 {
 		time.Sleep(250 * time.Millisecond)
 	}
 	corpus := sampleLines()
+	cycle := 0
 	upload := func() {
 		genCfg := loggen.Config{
 			OUI: deviceOUI, Serial: deviceSerial, ProductClass: deviceProductClass,
-			At: time.Now().UTC(), Scenario: cfg.scenario,
+			At: time.Now().UTC(), Scenario: cfg.scenario, Cycle: cycle,
 		}
 		logGz, errorLogGz, err := loggen.Generate(genCfg, corpus)
 		if err != nil {
@@ -78,11 +80,14 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 			// track uploads (~60s) rather than every 500ms session.
 			dev.markTransfer()
 		}
-		// The ErrorLog is the error-weighted slice of the same feed; its lines
-		// also appear in the Log above, so the cloud's content-dedup collapses
-		// the overlap (the real device writes alarms to both streams).
-		if err := curlUpload(cfg.host, cfg.user, cfg.pass, errorLogGz, "/"+genCfg.ErrorLogName()); err != nil {
-			log.Printf("ftp ErrorLog upload failed: %v", err)
+		// The ErrorLog is emitted ONLY during an incident window (errorLogGz != nil):
+		// its lines are the burst of error/alarm lines that also appear in this
+		// cycle's Log, so the cloud's content-dedup collapses the overlap — the real
+		// device uploads an ErrorLog around an incident, not on a fixed timer.
+		if errorLogGz != nil {
+			if err := curlUpload(cfg.host, cfg.user, cfg.pass, errorLogGz, "/"+genCfg.ErrorLogName()); err != nil {
+				log.Printf("ftp ErrorLog upload failed: %v", err)
+			}
 		}
 
 		// Self-triggering scenarios ALSO fire a separate probe upload against
@@ -99,6 +104,7 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 				log.Printf("ftp-auth-fail probe (expected failure, proves curl(67)): %v", err)
 			}
 		}
+		cycle++
 	}
 	upload()
 	ticker := time.NewTicker(cfg.interval)
