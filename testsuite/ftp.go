@@ -1,7 +1,7 @@
 // FTP upload path: the mock device curl-uploads real-shaped log archives to the
 // vsftpd container (exactly like the real NanoLink), which writes them into the
 // shared volume the agent's WatchFTP polls. Also holds the redacted real-log
-// corpus loggen replays into every generated archive.
+// corpus loggen replays into every generated slice.
 package main
 
 import (
@@ -45,8 +45,8 @@ type ftpUploadConfig struct {
 
 // runFTPUploadLoop waits for the device to Inform at least once (the agent's
 // device-id resolution depends on cwmp_devices being populated first), then
-// curl-uploads a real-shaped ring archive + bare Devicelog on the configured
-// cadence, matching the real device's ~60s cycle.
+// curl-uploads a real-shaped periodic Log_*.gz + ErrorLog_*.gz on the configured
+// cadence, matching the real device's ~60s VendorLog cycle.
 func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 	for dev.informs() == 0 {
 		time.Sleep(250 * time.Millisecond)
@@ -55,9 +55,9 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 	upload := func() {
 		genCfg := loggen.Config{
 			OUI: deviceOUI, Serial: deviceSerial, ProductClass: deviceProductClass,
-			PowerOnAt: time.Now().UTC(), Scenario: cfg.scenario,
+			At: time.Now().UTC(), Scenario: cfg.scenario,
 		}
-		archive, deviceLog, err := loggen.Generate(genCfg, corpus)
+		logGz, errorLogGz, err := loggen.Generate(genCfg, corpus)
 		if err != nil {
 			log.Printf("log generation failed: %v", err)
 			return
@@ -70,16 +70,19 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 		// carrying the fault line would never arrive (the point of the fault),
 		// making the typed-event assertion hollow for exactly the two
 		// scenarios meant to prove it.
-		if err := curlUpload(cfg.host, cfg.user, cfg.pass, archive, "/"+genCfg.ArchiveName()); err != nil {
-			log.Printf("ftp archive upload failed: %v", err)
+		if err := curlUpload(cfg.host, cfg.user, cfg.pass, logGz, "/"+genCfg.LogName()); err != nil {
+			log.Printf("ftp Log upload failed: %v", err)
 		} else {
 			// A real transfer completed -> the device is now due to announce it
 			// over CWMP (ATC). runSession emits exactly one ATC per mark, so ATCs
 			// track uploads (~60s) rather than every 500ms session.
 			dev.markTransfer()
 		}
-		if err := curlUpload(cfg.host, cfg.user, cfg.pass, deviceLog, "/"+genCfg.DeviceLogName()); err != nil {
-			log.Printf("ftp devicelog upload failed: %v", err)
+		// The ErrorLog is the error-weighted slice of the same feed; its lines
+		// also appear in the Log above, so the cloud's content-dedup collapses
+		// the overlap (the real device writes alarms to both streams).
+		if err := curlUpload(cfg.host, cfg.user, cfg.pass, errorLogGz, "/"+genCfg.ErrorLogName()); err != nil {
+			log.Printf("ftp ErrorLog upload failed: %v", err)
 		}
 
 		// Self-triggering scenarios ALSO fire a separate probe upload against
@@ -88,11 +91,11 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 		// delivery. Expected to fail; only logged for visibility.
 		switch cfg.scenario {
 		case loggen.ScenarioFTPPathReject:
-			if err := curlUpload(cfg.host, cfg.user, cfg.pass, archive, "/uploads/"+genCfg.ArchiveName()); err != nil {
+			if err := curlUpload(cfg.host, cfg.user, cfg.pass, logGz, "/uploads/"+genCfg.LogName()); err != nil {
 				log.Printf("ftp-path-reject probe (expected failure, proves curl(25)): %v", err)
 			}
 		case loggen.ScenarioFTPAuthFail:
-			if err := curlUpload(cfg.host, cfg.user, cfg.pass+"-wrong", archive, "/"+genCfg.ArchiveName()); err != nil {
+			if err := curlUpload(cfg.host, cfg.user, cfg.pass+"-wrong", logGz, "/"+genCfg.LogName()); err != nil {
 				log.Printf("ftp-auth-fail probe (expected failure, proves curl(67)): %v", err)
 			}
 		}

@@ -1,21 +1,25 @@
-// Package loggen builds real-shaped NanoLink log archives: a gzipped tar
-// ("continuouslogging.tgz") with the numbered ring layout (entries 1…10 +
-// index/max, no per-entry module semantics) and a bare "Devicelog" upload —
-// the two real upload shapes the agent ingests. Content is a redacted real
-// sample plus synthetic per-module lines, so every generated archive exercises
-// the agent's inline "[MODULE]" routing exactly like the genuine device.
+// Package loggen builds the real-shaped NanoLink log files the mock device
+// uploads over FTP each cycle: the routine periodic feed — a single-file gzip
+// "Log_<date>.<time>+<tz>_<OUI>.<serial>.gz" (the device's ~60s VendorLog slice)
+// plus its error-weighted sibling "ErrorLog_<…>.gz". Content is a redacted real
+// sample plus synthetic per-module lines, so every generated file exercises the
+// agent's inline "[MODULE]" routing exactly like the genuine device.
 //
-// Fidelity scope: ring layout without live rotation/wrap, single device,
-// continuouslogging + Devicelog only (no hourly Log_*/ErrorLog_*).
+// These two shapes REPLACE the earlier continuouslogging.tgz ring + bare
+// Devicelog as the emulator's routine emission: the real device only dumps those
+// on a reboot/power-on/manual pull, whereas Log_*.gz is what it pushes every
+// minute. The agent still ingests all shapes (.tgz, bare Devicelog, and now
+// Log_*.gz/ErrorLog_*.gz); the emulator now drives the routine path a real box
+// actually uses.
+//
+// Fidelity scope: a fixed corpus replayed each cycle (no live per-minute deltas
+// or ring rotation), single device, Log_*.gz + ErrorLog_*.gz only.
 package loggen
 
 import (
-	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -28,9 +32,6 @@ const (
 	corpusSerial       = "2205600282"
 	corpusProductClass = "ENB-N03002-B3"
 )
-
-// ringSize matches the real device's numbered-entry ring (1…10 + index/max).
-const ringSize = 10
 
 // Scenario selects which fault-signature line the generator appends, so a
 // scenario run has a deterministic typed event to assert on /health.
@@ -59,29 +60,32 @@ var scenarioLines = map[Scenario]string{
 	ScenarioReboot:        "[FM] Critical alarm 0x16010400 raised, system reboot will be taken to recover it after 90s.",
 }
 
-// Config parameterizes one generated log ring for a single device.
+// Config parameterizes one generated periodic-feed slice for a single device.
 type Config struct {
 	OUI          string
 	Serial       string
 	ProductClass string
-	PowerOnAt    time.Time
+	At           time.Time // when this slice is captured/uploaded (per cycle)
 	Scenario     Scenario
 }
 
-// ArchiveName is the real continuouslogging upload's filename shape.
-func (c Config) ArchiveName() string {
-	return fmt.Sprintf("%s_%s_PowerOn_%s_continuouslogging.tgz", c.OUI, c.Serial, c.PowerOnAt.Format("20060102_150405"))
+// LogName is the routine periodic feed's filename shape:
+// "Log_<YYYYMMDD>.<HHMM>+<tz>_<OUI>.<serial>.gz". The agent extracts OUI+serial
+// from the dot-joined tail; the timestamp/tz are cosmetic (the parser ignores
+// them). Minute (HHMM) granularity matches the real device.
+func (c Config) LogName() string {
+	return fmt.Sprintf("Log_%s_%s.%s.gz", c.At.Format("20060102.1504-0700"), c.OUI, c.Serial)
 }
 
-// DeviceLogName is the real bare Devicelog upload's filename shape (no .tgz).
-func (c Config) DeviceLogName() string {
-	return fmt.Sprintf("%s_%s_PowerOn_%s_Devicelog", c.OUI, c.Serial, c.PowerOnAt.Format("20060102_150405"))
+// ErrorLogName is the error-slice sibling's filename shape (same tail, "ErrorLog_" prefix).
+func (c Config) ErrorLogName() string {
+	return fmt.Sprintf("ErrorLog_%s_%s.%s.gz", c.At.Format("20060102.1504-0700"), c.OUI, c.Serial)
 }
 
 // syntheticLines fills out module diversity the redacted real sample doesn't
-// cover (e.g. NCM/SM), so the interleaved ring reads like a genuine capture.
+// cover (e.g. NCM/SM), so the generated slice reads like a genuine capture.
 func syntheticLines(cfg Config) []string {
-	ts := cfg.PowerOnAt.Format("2006-01-02 15:04:05.000")
+	ts := cfg.At.Format("2006-01-02 15:04:05.000")
 	return []string{
 		fmt.Sprintf("0000000002 %s [NCM] Neighbor cell list updated, count=6", ts),
 		fmt.Sprintf("0000000004 %s [SM] Session established, imsi=***, bearer=5", ts),
@@ -109,16 +113,21 @@ func rewriteIdentity(lines []string, cfg Config) []string {
 	return out
 }
 
-// Generate builds the gzipped ring archive and the bare Devicelog for cfg,
-// seeded from sampleLines (the redacted real corpus) plus per-module
-// synthetic filler and the scenario's fault-signature line.
-func Generate(cfg Config, sampleLines []string) (archive []byte, deviceLog []byte, err error) {
+// Generate builds the periodic-feed slice (Log_*.gz) and its error-weighted
+// sibling (ErrorLog_*.gz) for cfg, seeded from sampleLines (the redacted real
+// corpus) plus per-module synthetic filler and the scenario's fault line.
+//
+// Both are single-file gzip (NOT a tar). The ErrorLog is the alarm/error subset
+// of the same lines (see errorLogLines); those lines therefore also appear in
+// the full Log feed — the real device logs an alarm to both streams, and that
+// overlap collapses at the cloud on the content-derived dedup key (rules.dedup).
+func Generate(cfg Config, sampleLines []string) (logGz, errorLogGz []byte, err error) {
 	scenario := cfg.Scenario
 	if scenario == "" {
 		scenario = ScenarioHappy
 	}
 	seq := fmt.Sprintf("%010d", 1)
-	scenarioLine := seq + " " + cfg.PowerOnAt.Format("2006-01-02 15:04:05.000") + " " + scenarioLines[scenario]
+	scenarioLine := seq + " " + cfg.At.Format("2006-01-02 15:04:05.000") + " " + scenarioLines[scenario]
 
 	sampleLines = rewriteIdentity(sampleLines, cfg)
 	lines := make([]string, 0, len(sampleLines)+len(syntheticLines(cfg))+1)
@@ -126,91 +135,50 @@ func Generate(cfg Config, sampleLines []string) (archive []byte, deviceLog []byt
 	lines = append(lines, sampleLines...)
 	lines = append(lines, syntheticLines(cfg)...)
 
-	archive, err = buildRingArchive(lines)
+	logGz, err = buildGzipLog(lines)
 	if err != nil {
 		return nil, nil, err
 	}
-	// The bare Devicelog is the device's ALARM log — a distinct, smaller stream
-	// than the full continuous ring, not a copy of it. Alarm lines legitimately
-	// appear in both streams on the real device (an alarm is in the rolling log
-	// and the alarm log); that residual overlap is deduped at the cloud on the
-	// content-derived key (device, eventType, raw) — see rules.dedup.
-	deviceLog = buildDeviceLog(alarmLines(lines))
-	return archive, deviceLog, nil
+	errorLogGz, err = buildGzipLog(errorLogLines(lines))
+	if err != nil {
+		return nil, nil, err
+	}
+	return logGz, errorLogGz, nil
 }
 
-// alarmModules are the modules the device also writes to its separate alarm
-// log (Devicelog): fault management, TR-069/ACS alarms, and SCTP connection
-// alarms. FILE_TRANS/SON/SCM/NCM/etc. operational chatter stays in the ring only.
-var alarmModules = map[string]bool{"FM": true, "TR69": true, "SCTP": true}
-
-var moduleTagRe = regexp.MustCompile(`\[([A-Za-z0-9_]+)\]`)
-
-// alarmLines returns the alarm-class subset of lines — the Devicelog stream —
-// selected by the inline "[MODULE]" tag (the same tag the agent routes on).
-func alarmLines(lines []string) []string {
+// errorLogLines selects the error/alarm subset for the ErrorLog stream — lines
+// whose text carries an alarm/fault/fail/error marker (the same predicate the
+// agent's rules.alarmy fallback keys on). The happy-path curl(0) success line is
+// deliberately excluded (a success is not an error); background alarms already in
+// the corpus keep ErrorLog non-empty even on the happy scenario, as on a real box.
+func errorLogLines(lines []string) []string {
 	var out []string
 	for _, l := range lines {
-		if m := moduleTagRe.FindStringSubmatch(l); m != nil && alarmModules[m[1]] {
+		if isErrorLine(l) {
 			out = append(out, l)
 		}
 	}
 	return out
 }
 
-// buildRingArchive distributes lines round-robin across numbered ring
-// entries "1"…"10" (all modules interleaved, as the real device does), plus
-// "index"/"max" bookkeeping entries. No live rotation (single-shot fidelity).
-func buildRingArchive(lines []string) ([]byte, error) {
-	buckets := make([][]string, ringSize)
-	for i, l := range lines {
-		b := i % ringSize
-		buckets[b] = append(buckets[b], l)
-	}
+func isErrorLine(l string) bool {
+	s := strings.ToLower(l)
+	return strings.Contains(s, "alarm") || strings.Contains(s, "fault") ||
+		strings.Contains(s, "fail") || strings.Contains(s, "error")
+}
 
+// buildGzipLog gzip-compresses the given lines into a single file (one line per
+// "\n") — the real periodic-feed shape (Log_*.gz / ErrorLog_*.gz), NOT a tar.
+func buildGzipLog(lines []string) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	writeEntry := func(name, body string) error {
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}); err != nil {
-			return err
-		}
-		_, err := tw.Write([]byte(body))
-		return err
-	}
-	for i := 0; i < ringSize; i++ {
-		name := strconv.Itoa(i + 1)
-		body := ""
-		for _, l := range buckets[i] {
-			body += l + "\n"
-		}
-		if err := writeEntry(name, body); err != nil {
+	for _, l := range lines {
+		if _, err := gz.Write([]byte(l + "\n")); err != nil {
 			return nil, err
 		}
-	}
-	if err := writeEntry("index", "1\n"); err != nil {
-		return nil, err
-	}
-	if err := writeEntry("max", strconv.Itoa(ringSize)+"\n"); err != nil {
-		return nil, err
-	}
-	if err := tw.Close(); err != nil {
-		return nil, err
 	}
 	if err := gz.Close(); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// buildDeviceLog concatenates the given (alarm-class) lines uncompressed — the
-// real Devicelog carries the identical "<seq> <ts> [MODULE] <msg>" format, just
-// uploaded bare (no .tgz) and scoped to the alarm stream (see alarmLines).
-func buildDeviceLog(lines []string) []byte {
-	var buf bytes.Buffer
-	for _, l := range lines {
-		buf.WriteString(l)
-		buf.WriteByte('\n')
-	}
-	return buf.Bytes()
 }

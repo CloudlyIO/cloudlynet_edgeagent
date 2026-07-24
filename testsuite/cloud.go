@@ -196,13 +196,17 @@ func cloudMux(st *state) http.Handler {
 func acsHealthMux(dev *device, ftpDir, mode, agentURL string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		archives, _ := filepath.Glob(path.Join(ftpDir, "*.tgz"))
+		// Count every real upload shape the emulator now emits: the routine
+		// periodic feed (Log_*.gz / ErrorLog_*.gz) plus any reboot-dump .tgz.
+		logs, _ := filepath.Glob(path.Join(ftpDir, "Log_*.gz"))
+		errLogs, _ := filepath.Glob(path.Join(ftpDir, "ErrorLog_*.gz"))
+		tgz, _ := filepath.Glob(path.Join(ftpDir, "*.tgz"))
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":            dev.informs() > 0,
 			"mode":          mode,
 			"platform_mock": false,
 			"cwmp":          map[string]any{"agent_url": agentURL, "informs_sent": dev.informs()},
-			"ftp":           map[string]any{"dir": ftpDir, "archives": len(archives)},
+			"ftp":           map[string]any{"dir": ftpDir, "uploads": len(logs) + len(errLogs) + len(tgz)},
 		})
 	})
 	return mux

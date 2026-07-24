@@ -71,9 +71,9 @@ lifecycle, then asserts the result via the `/health` gate.
       ├─▶ AutonomousTransferComplete → agent answers EMPTY, never Fault   [CWMP session survives]
       ├─▶ cloud sends 3 commands → agent applies over CWMP → acks         [command loop]
       ├─▶ agent reads 24 managed params (GPV) → config snapshot           [snapshot == 24]
-      └─▶ device curl-uploads  ring.tgz + bare Devicelog
+      └─▶ device curl-uploads  Log_*.gz + ErrorLog_*.gz (routine ~60s feed)
              └▶ real vsftpd → shared volume → agent WatchFTP → parse:
-                  · module from the inline [MODULE] tag   · bare Devicelog ingested too
+                  · module from the inline [MODULE] tag   · single-file gzip un-gzipped
                   · device = canonical id via the store   · rules classify the lines
              └▶ typed events → telemetry (1st push force-failed → outbox retry) → cloud
                   └▶ /health flips ok:true once every check below passes
@@ -239,17 +239,19 @@ Compose-level overrides (all optional, with defaults):
 
 ## Log generation
 
-`loggen.Generate` builds the two real upload shapes:
+`loggen.Generate` builds the two real **periodic-feed** upload shapes — the ~60s VendorLog stream the
+device pushes every cycle (not the reboot-only `continuouslogging.tgz` dump, which the agent still
+ingests but the emulator no longer emits):
 
-- **`<OUI>_<serial>_PowerOn_<ts>_continuouslogging.tgz`** — the numbered ring (entries `1…10` +
-  `index`/`max`, all modules interleaved), module living inline as `[FILE_TRANS]`/`[TR69]`/`[FM]`/… on
-  each line.
-- **`<OUI>_<serial>_PowerOn_<ts>_Devicelog`** — a bare (no `.tgz`) alarm-class subset.
+- **`Log_<date>.<time>+<tz>_<OUI>.<serial>.gz`** — a single-file gzip (NOT a tar) of the full
+  operational slice, module living inline as `[FILE_TRANS]`/`[TR69]`/`[FM]`/… on each line.
+- **`ErrorLog_<date>.<time>+<tz>_<OUI>.<serial>.gz`** — the same shape, scoped to the error/alarm
+  subset. Its lines also appear in the `Log` feed; the cloud's content-dedup collapses the overlap.
 
 Content is a small **redacted real sample** (`fixtures/real_sample.log`) plus **synthetic per-module
-filler** and the scenario's fault line. Fidelity scope: `continuouslogging` + `Devicelog` only, ring
-layout without live rotation, single device. Real FTP credentials are redacted in the fixture —
-**never commit real credentials.**
+filler** and the scenario's fault line. Fidelity scope: `Log_*.gz` + `ErrorLog_*.gz` only, a fixed
+corpus replayed each cycle (no live per-minute deltas), single device. Real FTP credentials are
+redacted in the fixture — **never commit real credentials.**
 
 **Full detail — the line format, the two artifacts, the per-scenario staged lines, and the fixture:
 [`loggen/README.md`](loggen/README.md).**
