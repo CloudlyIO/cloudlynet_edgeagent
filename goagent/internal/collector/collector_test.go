@@ -378,6 +378,29 @@ func TestPeriodicLogAndErrorLogShareDedupKey(t *testing.T) {
 	}
 }
 
+// TestScanFTPIgnoresForensicArtifacts locks the "forensic is inert" contract: the
+// device's dump-time forensic blobs (fsm.log.gz, reboottraces_*.tgz, varlog.tgz)
+// carry no [MODULE] tags and must NEVER become telemetry events. fsm.log.gz ends
+// in .gz but lacks the Log_/ErrorLog_ prefix (isPeriodicLog rejects it); the .tgz
+// blobs are parked. Guards a future over-broad filter from ingesting ~20MB of
+// /var/log as spurious events.
+func TestScanFTPIgnoresForensicArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	c := newTestCollector(t, dir, true)
+	base := testOUI + "_" + testSerial + "_PowerOn_20240622_142356_"
+
+	// fsm.log.gz: valid gzip content, but the wrong prefix → not the periodic feed.
+	writeGzipLog(t, dir, base+"fsm.log.gz", []string{"0000000001 2024-06-22 14:23:56.000 [FM] fsm dump line"})
+	// reboottraces / varlog: .tgz blobs (dispatch parked); content has no [MODULE].
+	writeRingArchive(t, dir, base+"reboottraces_cpuh.tgz", map[string][]string{"trace": {"crash backtrace, no module tag"}})
+	writeRingArchive(t, dir, base+"varlog.tgz", map[string][]string{"messages": {"Jan  1 00:00:00 kernel: something failed"}})
+
+	c.scanFTP()
+	if events := c.DrainEvents(); len(events) != 0 {
+		t.Fatalf("forensic artifacts must not produce events; got %+v", events)
+	}
+}
+
 // TestScanFTPColdStartRace: the log arrives before Inform, then the device
 // onboards — the deferred upload must land on the correct device once known,
 // not the unresolved sentinel.
