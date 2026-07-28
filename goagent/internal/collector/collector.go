@@ -261,6 +261,7 @@ func (c *Collector) scanFTP() {
 			continue
 		}
 		c.markSeen(path)
+		log.Printf("ftp ingest: %s -> %d event(s) [%s]", filepath.Base(path), len(events), deviceID)
 		c.QueueEvents(events)
 	}
 	// Keep seenPaths/deferred bounded by the directory contents: forget entries
