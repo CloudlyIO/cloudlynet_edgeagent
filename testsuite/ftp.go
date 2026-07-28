@@ -75,10 +75,11 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 		if err := curlUpload(cfg.host, cfg.user, cfg.pass, logGz, "/"+genCfg.LogName()); err != nil {
 			log.Printf("ftp Log upload failed: %v", err)
 		} else {
-			// A real transfer completed -> the device is now due to announce it
-			// over CWMP (ATC). runSession emits exactly one ATC per mark, so ATCs
-			// track uploads (~60s) rather than every 500ms session.
-			dev.markTransfer()
+			log.Printf("ftp Log upload ok: %s (%d bytes)", genCfg.LogName(), len(logGz))
+			// A real transfer completed -> the device is now due to announce it over
+			// CWMP (ATC), naming the file it just uploaded. runSession emits exactly
+			// one ATC per mark, so ATCs track uploads (~60s) not every 500ms session.
+			dev.markTransfer(genCfg.LogName(), len(logGz))
 		}
 		// The ErrorLog is emitted ONLY during an incident window (errorLogGz != nil):
 		// its lines are the burst of error/alarm lines that also appear in this
@@ -87,6 +88,8 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 		if errorLogGz != nil {
 			if err := curlUpload(cfg.host, cfg.user, cfg.pass, errorLogGz, "/"+genCfg.ErrorLogName()); err != nil {
 				log.Printf("ftp ErrorLog upload failed: %v", err)
+			} else {
+				log.Printf("ftp ErrorLog upload ok (incident): %s (%d bytes)", genCfg.ErrorLogName(), len(errorLogGz))
 			}
 		}
 

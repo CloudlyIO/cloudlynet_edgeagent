@@ -33,6 +33,13 @@ type device struct {
 	params      map[string]string
 	informsSent int64
 	pendingXfer int64
+	lastXfer    atomic.Value // most recent xfer, announced by the next ATC
+}
+
+// xfer is the file a completed autonomous transfer announces over ATC.
+type xfer struct {
+	name string
+	size int
 }
 
 // newDevice seeds the mock device's entire param store from the NanoLink
@@ -75,21 +82,27 @@ func (d *device) informs() int64 {
 	return atomic.LoadInt64(&d.informsSent)
 }
 
-// markTransfer records a completed autonomous file transfer (a log upload).
-// runSession emits one ATC per recorded transfer, so ATC cadence tracks real
-// uploads (~60s) instead of firing on every CWMP session — matching a real
-// device, which only ATCs when it actually finishes uploading a file.
-func (d *device) markTransfer() { atomic.AddInt64(&d.pendingXfer, 1) }
+// markTransfer records a completed autonomous file transfer (a log upload) and
+// the file it uploaded. runSession emits one ATC per recorded transfer, so ATC
+// cadence tracks real uploads (~60s) instead of firing on every CWMP session —
+// matching a real device, which only ATCs when it finishes uploading a file, and
+// announces that exact file.
+func (d *device) markTransfer(name string, size int) {
+	d.lastXfer.Store(xfer{name: name, size: size})
+	atomic.AddInt64(&d.pendingXfer, 1)
+}
 
-// takeTransfer consumes one pending transfer, reporting whether an ATC is due.
-func (d *device) takeTransfer() bool {
+// takeTransfer consumes one pending transfer, returning the file to announce and
+// whether an ATC is due.
+func (d *device) takeTransfer() (xfer, bool) {
 	for {
 		n := atomic.LoadInt64(&d.pendingXfer)
 		if n <= 0 {
-			return false
+			return xfer{}, false
 		}
 		if atomic.CompareAndSwapInt64(&d.pendingXfer, n, n-1) {
-			return true
+			x, _ := d.lastXfer.Load().(xfer)
+			return x, true
 		}
 	}
 }
@@ -143,8 +156,8 @@ func runSession(client *http.Client, agentURL string, dev *device, m *manifest) 
 
 	// ATC only when a log upload actually completed (see device.markTransfer),
 	// so we don't announce a transfer every 500ms session like the old loop did.
-	if dev.takeTransfer() {
-		atc, _ := post(client, agentURL, atcEnvelope(msgID))
+	if x, ok := dev.takeTransfer(); ok {
+		atc, _ := post(client, agentURL, atcEnvelope(msgID, x.name, x.size))
 		if strings.Contains(strings.ToLower(atc), "fault") {
 			log.Printf("REGRESSION: agent answered AutonomousTransferComplete with a Fault:\n%s", atc)
 		}

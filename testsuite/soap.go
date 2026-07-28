@@ -65,12 +65,15 @@ func transferCompleteEnvelope(msgID string) string {
 	return wrap(msgID, inner)
 }
 
-func atcEnvelope(msgID string) string {
+// atcEnvelope announces the file the device just uploaded on its own — a routine
+// VendorLog (Log_*.gz). targetFile/size reflect the actual upload rather than a
+// placeholder, so the agent's CWMP trace matches what really landed on FTP.
+func atcEnvelope(msgID, targetFile string, size int) string {
 	now := time.Now().UTC().Format(time.RFC3339)
 	inner := `<cwmp:AutonomousTransferComplete>` +
 		`<AnnounceURL></AnnounceURL><TransferURL>ftp://192.168.8.100/</TransferURL>` +
-		`<IsDownload>0</IsDownload><FileType>4 Vendor Log File</FileType><FileSize>2048</FileSize>` +
-		`<TargetFileName>` + deviceCWMPID + `_DeviceLog.tgz</TargetFileName>` +
+		`<IsDownload>0</IsDownload><FileType>4 Vendor Log File</FileType><FileSize>` + fmt.Sprintf("%d", size) + `</FileSize>` +
+		`<TargetFileName>` + targetFile + `</TargetFileName>` +
 		`<FaultStruct><FaultCode>0</FaultCode><FaultString></FaultString></FaultStruct>` +
 		`<StartTime>` + now + `</StartTime>` +
 		`<CompleteTime>` + now + `</CompleteTime>` +
