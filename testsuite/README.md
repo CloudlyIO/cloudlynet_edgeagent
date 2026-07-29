@@ -281,7 +281,7 @@ names exist to signal intent (CWMP-only focus vs. CWMP+FTP against a real cloud)
 
 ## Validating against the real platform
 
-`full` mode is self-contained. To validate the live config loop against a **real** NetAI cloud — "add
+`full` mode is self-contained. To validate the live config loop against a **real** CloudlyNet cloud — "add
 this as a device and configure it from the dashboard", no lab hardware — run in `acsftp` mode: the mock
 cloud switches off and the testsuite plays only the mock NanoLink device (+ FTP), so the real agent
 talks to your platform.

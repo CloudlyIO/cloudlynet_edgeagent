@@ -1,9 +1,9 @@
 # Agent Context — cloudlynet_edgeagent
 
 ## Derived Understanding
-- This submodule owns the Go edge agent only. Platform-side `/v1/agent/**` handlers and database persistence are owned by the CloudlyNet AI platform team and are consumed through `design/openapi.yaml`.
+- This submodule owns the Go edge agent only. Platform-side `/v1/agent/**` handlers and database persistence are owned by the CloudlyNet platform team and are consumed through `design/openapi.yaml`.
 - The agent **hosts an in-agent TR-069/CWMP ACS on `:7547`** (the exact port the NanoLink dials, so replacing the old ACS needs no device-side change). It talks to CloudlyNet outbound over REST and watches the local FTP log drop. The device dials the agent; the agent dials the cloud.
-- The local `testsuite` is a separate mock microservice (its own Go module — it cannot import `goagent/internal/*`, so it hand-rolls SOAP) for functional testing, not production code. It can run in full mock mode (CloudlyNet cloud + a mock NanoLink CWMP device that dials `:7547` + FTP) or `acsftp` mode (only the CWMP device + FTP) for live NetAI platform validation.
+- The local `testsuite` is a separate mock microservice (its own Go module — it cannot import `goagent/internal/*`, so it hand-rolls SOAP) for functional testing, not production code. It can run in full mock mode (CloudlyNet cloud + a mock NanoLink CWMP device that dials `:7547` + FTP) or `acsftp` mode (only the CWMP device + FTP) for live CloudlyNet platform validation.
 - Production edge deployment (Ubuntu 22.04) is **native + systemd**, not Docker. `Makefile` + `scripts/install.sh` bootstrap Go, build from source, and install a `cloudlynet-edgeagent` systemd service. Docker/compose is retained only for local/CI functional testing.
 - The agent's SQLite is an **embedded local file** via `modernc.org/sqlite` (pure Go, `CGO_ENABLED=0`) — not a separate service/container. It only needs a writable data dir (`/var/lib/cloudlynet-agent`); the install toolchain therefore needs no gcc/CGO.
 
