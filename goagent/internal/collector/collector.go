@@ -38,36 +38,11 @@ var inventoryStatusPaths = []string{pathRFTxStatus, pathOpState, pathLANIP, path
 // before falling back to the last cached values.
 const snapshotAwait = 10 * time.Second
 
-// SnapshotPaths is the complete curated managed-parameter catalogue shown by the
-// NanoLink Config tab. Keep this list aligned with SMO Sim's MANAGED_PARAMS and
-// the frontend managed-params.ts catalogue; status/telemetry paths do not belong
-// in a configuration snapshot.
-var SnapshotPaths = []string{
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.PhyCellID",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNDL",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNUL",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.FreqBandIndicator",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.DLBandwidth",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ULBandwidth",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower",
-	"Device.Services.FAPService.1.Capabilities.MaxTxPower",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pa",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pb",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXEnabled",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.OnDurationTimer",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXInactivityTimer",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.LongDRXCycle",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.ShortDRXCycle",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.X_8C1F64_PCH.DefaultPagingCycle",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.QRxLevMinSIB1",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.SIntraSearch",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A2ThresholdRSRP",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A1ThresholdRSRP",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.Hysteresis",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.TimeToTrigger",
-	"Device.ManagementServer.PeriodicInformInterval",
-	autonomousTransferCompletePolicy,
-}
+// SnapshotPaths is the curated managed-parameter catalogue shown by the NanoLink Config
+// tab. It is an alias for the GENERATED ManagedPaths (see managed_paths.go), which is
+// derived from smo_sim's managed_params.py, the single write-validation gate. It used to
+// be a hand-maintained copy. Status and telemetry paths do not belong in a snapshot.
+var SnapshotPaths = ManagedPaths
 
 // maxDeferTicks bounds how long scanFTP defers an upload from a not-yet-known
 // device (~30 ticks at the 2s poll interval == ~60s), matching the real
