@@ -7,6 +7,7 @@
 package main
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"log"
@@ -54,7 +55,84 @@ func newDevice(m *manifest) *device {
 	params["Device.WAN.IPAddress"] = "10.0.0.10"
 	params["Device.DeviceInfo.SerialNumber"] = deviceSerial
 	params["Device.DeviceInfo.ProductClass"] = deviceProductClass
+
+	// PM counters the agent's T3 collector reads (goagent/internal/collector/metrics.go
+	// tier3Metrics), pinned over whatever the manifest snapshot carries. Without known
+	// values the mock device answers T3 GPVs with the manifest's captured numbers (or
+	// nothing), telemetry carries no deterministic sinr_avg_db or rrc_success_pct, and
+	// the closed loop's KPI watch has nothing to judge - which looks exactly like a
+	// healthy window (a missing KPI is not a breach). Values are the HEALTHY baseline;
+	// EPIC-5's e2e and demo degrade 412 through POST /device/params to trigger the
+	// rollback.
+	for k, v := range map[string]string{
+		"Device.Services.FAPService.1.FAPControl.LTE.AdminState":                    "1",
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.316.X_8C1F64_CurrentValue": "42.0", // prb_dl_pct
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.315.X_8C1F64_CurrentValue": "18.0", // prb_ul_pct
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.412.X_8C1F64_CurrentValue": "12.5", // sinr_avg_db
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.10.X_8C1F64_CurrentValue":  "6",    // rrc_conn_mean
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.118.X_8C1F64_CurrentValue": "35.2", // thp_dl
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.119.X_8C1F64_CurrentValue": "9.8",  // thp_ul
+		// rrc_success_pct is derived: 118/120 = 98.3%, comfortably above the 95% guardrail.
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.168.X_8C1F64_CurrentValue": "120", // RRC.AttConnEstab
+		"Device.PeriodicStatistics.SampleSet.1.Parameter.170.X_8C1F64_CurrentValue": "118", // RRC.SuccConnEstab
+		"Device.DeviceInfo.UpTime":                 "86400",
+		"Device.DeviceInfo.MemoryStatus.Free":      "180000",
+		"Device.DeviceInfo.MemoryStatus.Total":     "256000",
+		"Device.DeviceInfo.ProcessStatus.CPUUsage": "17",
+	} {
+		params[k] = v
+	}
 	return &device{params: params}
+}
+
+// deviceParamsHandler serves /device/params - test and demo fault injection plus read-back.
+//
+//	POST body {"<full TR-069 path>": "<value>"}  -> {"ok": true, "written": N}
+//	GET  ?path=<full TR-069 path>&path=...       -> {"ok": true, "params": {...}}
+//
+// One handler for both verbs, not two: http.ServeMux routes on PATH, so registering a second
+// handler for the same path panics at startup rather than adding a method.
+//
+// Registered on BOTH muxes because the two modes serve different audiences and both need it: the
+// full-mode platform mock is what the agent's own integration run uses, and acsftp mode is what
+// EPIC-5's e2e and rollback demo use against the real gateway. A handler on only one of them means
+// either the demo works and the agent suite cannot degrade a device, or the reverse.
+//
+// Values are strings because that is what CWMP carries and what `device.params` stores; sending
+// 12.5 as a JSON number is a decode error rather than a silent coercion, which is the honest
+// outcome. The GET exists so the e2e can prove an apply actually reached the device rather than
+// only that a command row claims it did.
+func deviceParamsHandler(dev *device) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var kv map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&kv); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			writes := make([][2]string, 0, len(kv))
+			for k, v := range kv {
+				writes = append(writes, [2]string{k, v})
+			}
+			dev.set(writes)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "written": len(writes)})
+		case http.MethodGet:
+			paths := r.URL.Query()["path"]
+			if len(paths) == 0 {
+				writeJSON(w, http.StatusBadRequest,
+					map[string]any{"ok": false, "error": "at least one ?path= is required"})
+				return
+			}
+			values := map[string]string{}
+			for _, pair := range dev.get(paths) {
+				values[pair[0]] = pair[1]
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "params": values})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}
 }
 
 func (d *device) get(paths []string) [][2]string {
