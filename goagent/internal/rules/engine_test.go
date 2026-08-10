@@ -1,30 +1,35 @@
 package rules
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // TestDedupKeyContentDerived locks in the fix: the dedup key must be derived
-// from (device, eventType, raw) only — no parse-time component — so the same
-// log line yields the same key across separate parses (ring vs Devicelog
-// overlap, and post-restart re-parse), letting the cloud dedup it.
+// from (device, eventType, upload bucket, raw) — no parse-time component — so
+// the same log line yields the same key across separate parses of the same
+// upload day (Log∩ErrorLog overlap, and post-restart re-parse), letting the
+// cloud dedup it.
 func TestDedupKeyContentDerived(t *testing.T) {
 	e := DefaultEngine()
 	line := "0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0)"
-	first := e.Apply([]string{line}, "dev-1")
-	second := e.Apply([]string{line}, "dev-1")
+	first := e.Apply([]string{line}, "dev-1", "20240603")
+	second := e.Apply([]string{line}, "dev-1", "20240603")
 	if len(first) != 1 || len(second) != 1 {
 		t.Fatalf("events = %d and %d, want 1 each", len(first), len(second))
 	}
 	if first[0].DedupKey != second[0].DedupKey {
 		t.Errorf("dedup key not stable across parses: %q vs %q", first[0].DedupKey, second[0].DedupKey)
 	}
-	other := e.Apply([]string{"0000000218 2024-06-02 23:51:23.000 [FILE_TRANS] File upload success, curl code=(0)"}, "dev-1")
+	other := e.Apply([]string{"0000000218 2024-06-02 23:51:23.000 [FILE_TRANS] File upload success, curl code=(0)"}, "dev-1", "20240603")
 	if len(other) == 1 && other[0].DedupKey == first[0].DedupKey {
 		t.Errorf("distinct raw lines must not share a dedup key")
 	}
 }
 
 func TestDefaultRules(t *testing.T) {
-	events := DefaultEngine().Apply([]string{"0000000031 2024-06-02 07:03:19.616 [TR69] RPC Unknown received from ACS"}, "dev-1")
+	events := DefaultEngine().Apply([]string{"0000000031 2024-06-02 07:03:19.616 [TR69] RPC Unknown received from ACS"}, "dev-1", "20240603")
 	if len(events) != 1 {
 		t.Fatalf("events = %d", len(events))
 	}
@@ -55,7 +60,7 @@ func TestApplyRoutesModulePerLine(t *testing.T) {
 		"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)",
 		"0000000030 2024-06-02 07:07:38.097 [TR69] RPC Unknown received from ACS",
 	}
-	events := DefaultEngine().Apply(lines, "dev-1")
+	events := DefaultEngine().Apply(lines, "dev-1", "20240603")
 	if len(events) != 2 {
 		t.Fatalf("events = %d, want 2 (SCM line has no matching rule/alarm keyword): %+v", len(events), events)
 	}
@@ -76,7 +81,7 @@ func TestCurlConnFailAndTimeoutRules(t *testing.T) {
 		"0000000017 2024-06-02 11:29:41.293 [FILE_TRANS] File upload failure, curl code=(7), command (...)",
 		"0000000116 2024-06-02 22:42:21.226 [FILE_TRANS] File upload failure, curl code=(28), command (...)",
 	}
-	events := DefaultEngine().Apply(lines, "dev-1")
+	events := DefaultEngine().Apply(lines, "dev-1", "20240603")
 	if len(events) != 2 {
 		t.Fatalf("events = %d, want 2: %+v", len(events), events)
 	}
@@ -97,7 +102,7 @@ func TestVendorACSUnreachableMatchesRealTR69Text(t *testing.T) {
 		"0000000032 2024-06-02 07:07:38.745 [TR69] Alarm Logged, id: 0x18020400 file: main/informer.c line: 175 detail: ACS connect failed, retryCount = 1, backOffTime = 6000ms",
 		"0000000030 2024-06-02 07:07:38.097 [TR69] Alarm Report, id: 0x18020500 file: main/informer.c line: 307 detail: ACS Disconnect with error 1 (0:eOK, 1:eConnectError, 2:eGetError, 3:ePostError, 4:eAuthError)",
 	}
-	events := DefaultEngine().Apply(lines, "dev-1")
+	events := DefaultEngine().Apply(lines, "dev-1", "20240603")
 	if len(events) != 3 {
 		t.Fatalf("events = %d, want 3: %+v", len(events), events)
 	}
@@ -112,8 +117,52 @@ func TestVendorACSUnreachableMatchesRealTR69Text(t *testing.T) {
 // match a rule (no rule declares an empty Module) — it only ever hits the
 // alarmy() generic fallback.
 func TestUntaggedLineFallsBackToAlarmy(t *testing.T) {
-	events := DefaultEngine().Apply([]string{"a plain line reporting a fault with no module tag"}, "dev-1")
+	events := DefaultEngine().Apply([]string{"a plain line reporting a fault with no module tag"}, "dev-1", "20240603")
 	if len(events) != 1 || events[0].EventType != "unclassified" {
 		t.Fatalf("events = %+v, want one unclassified event", events)
+	}
+}
+
+// TestDedupKeyDistinguishesOccurrenceDays: a box whose clock/seq counter resets
+// on every boot re-emits byte-identical fault lines; keys must differ across
+// upload days so recurrences resurface instead of being swallowed forever by
+// the cloud's ON CONFLICT(dedup_key).
+func TestDedupKeyDistinguishesOccurrenceDays(t *testing.T) {
+	line := "0000000032 1970-01-01 00:00:38.745 [TR69] Alarm Logged, id: 0x18020400 file: main/informer.c line: 175 detail: ACS connect failed, retryCount = 1, backOffTime = 7000ms"
+	day1 := DefaultEngine().Apply([]string{line}, "dev-1", "20240603")
+	day2 := DefaultEngine().Apply([]string{line}, "dev-1", "20240604")
+	if len(day1) != 1 || len(day2) != 1 {
+		t.Fatalf("want 1 event per parse, got %d and %d", len(day1), len(day2))
+	}
+	if day1[0].DedupKey == day2[0].DedupKey {
+		t.Errorf("recurrence in a later upload day must get a new dedup key")
+	}
+}
+
+// TestLoadRejectsPreV2RulesFile: v1 files were written against
+// filename-derived module matching and can silently never fire under the
+// per-line engine — Load must refuse them so the agent falls back to correct
+// built-in defaults instead of running dead rules.
+func TestLoadRejectsPreV2RulesFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "rules.yaml")
+	v1 := "rules:\n  - module: FM\n    match: reboot\n    event_type: device_reboot\n    severity: critical\n"
+	if err := os.WriteFile(f, []byte(v1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(f); err == nil {
+		t.Fatal("Load accepted a versionless (v1) rules file")
+	}
+}
+
+// TestLoadAcceptsShippedRulesFile guards the config/rules.yaml <-> engine
+// lockstep: the file the installer ships must load under the current version.
+func TestLoadAcceptsShippedRulesFile(t *testing.T) {
+	e, err := Load("../../../config/rules.yaml")
+	if err != nil {
+		t.Fatalf("shipped config/rules.yaml does not load: %v", err)
+	}
+	events := e.Apply([]string{"0000000031 2024-06-02 07:03:19.616 [TR69] RPC Unknown received from ACS"}, "dev-1", "20240602")
+	if len(events) != 1 || events[0].EventType != "atc_fault_loop" {
+		t.Fatalf("shipped rules did not classify the ATC fault line: %+v", events)
 	}
 }

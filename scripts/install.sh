@@ -114,6 +114,15 @@ install_files() {
 	fi
 	if [ ! -f "$CONFDIR/rules.yaml" ]; then
 		install -m0644 "$REPO_DIR/config/rules.yaml" "$CONFDIR/rules.yaml"
+	elif ! grep -q '^version:[[:space:]]*2' "$CONFDIR/rules.yaml"; then
+		# Pre-v2 rules file: the engine's `module:` semantics changed (per-line
+		# [MODULE] tag, not the filename), so v1 rules can silently never fire.
+		# Replace with the new default; the operator's file is preserved for
+		# hand-migration. (The agent would refuse the v1 file anyway and run
+		# built-in defaults — this makes the upgrade explicit.)
+		mv "$CONFDIR/rules.yaml" "$CONFDIR/rules.yaml.pre-v2"
+		install -m0644 "$REPO_DIR/config/rules.yaml" "$CONFDIR/rules.yaml"
+		log "MIGRATED $CONFDIR/rules.yaml: pre-v2 rule semantics are incompatible — installed the v2 default, your old file is at rules.yaml.pre-v2 (re-apply custom rules there onto the new file)"
 	else
 		install -m0644 "$REPO_DIR/config/rules.yaml" "$CONFDIR/rules.yaml.default"
 		log "kept existing $CONFDIR/rules.yaml (new default at rules.yaml.default)"
