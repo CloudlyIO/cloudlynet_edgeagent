@@ -14,13 +14,22 @@ BIN         := $(BIN_DIR)/$(BINARY)
 # Pure-Go SQLite (modernc.org/sqlite) => no CGO toolchain required.
 GO_BUILD_ENV := CGO_ENABLED=0
 
+# Scenario for `make e2e-scenario` (full list in `make help`).
+SCENARIO ?= happy
+
+# The compose file is a local TEST/validation harness, not a production deploy
+# (production = scripts/install.sh + systemd). Exported so every `docker compose`
+# recipe + scripts/e2e.sh targets it without a bare `docker compose up` starting it.
+export COMPOSE_FILE := docker-compose.test.yml
+
 .DEFAULT_GOAL := help
 
-.PHONY: help build test vet fmt run clean install uninstall \
-        docker-build docker-up docker-down docker-logs
+.PHONY: help build test test-suite test-all vet fmt run clean install uninstall \
+        docker-build docker-up docker-down docker-logs sync-manifest \
+        e2e e2e-scenario e2e-all verify
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n",$$1,$$2}'
 
 build: ## Build the agent binary into bin/ (CGO disabled)
@@ -28,14 +37,21 @@ build: ## Build the agent binary into bin/ (CGO disabled)
 	cd $(GOAGENT_DIR) && $(GO_BUILD_ENV) $(GO) build -trimpath -o ../$(BIN) $(PKG)
 	@echo "built $(BIN)"
 
-test: ## Run unit tests
+test: ## Run agent unit tests (goagent module)
 	cd $(GOAGENT_DIR) && $(GO) test ./...
 
-vet: ## Run go vet
-	cd $(GOAGENT_DIR) && $(GO) vet ./...
+test-suite: ## Run testsuite unit tests (loggen generator)
+	cd testsuite && $(GO) test ./...
 
-fmt: ## Format Go sources
+test-all: test test-suite ## Run unit tests for both modules (goagent + testsuite)
+
+vet: ## Run go vet (both modules)
+	cd $(GOAGENT_DIR) && $(GO) vet ./...
+	cd testsuite && $(GO) vet ./...
+
+fmt: ## Format Go sources (both modules)
 	cd $(GOAGENT_DIR) && $(GO) fmt ./...
+	cd testsuite && $(GO) fmt ./...
 
 run: build ## Build and run locally against config/agent.yaml
 	./$(BIN) --config config/agent.yaml
@@ -60,3 +76,19 @@ docker-down: ## Stop and remove the local test stack
 
 docker-logs: ## Tail edge agent container logs
 	docker compose logs -f cloudlynet-edgeagent
+
+sync-manifest: ## Copy the in-repo NanoLink manifest into testsuite's embedded asset (single source of truth)
+	cp $(GOAGENT_DIR)/internal/cwmp/assets/nanolink_param_manifest.json testsuite/assets/nanolink_param_manifest.json
+	@echo "synced testsuite/assets/nanolink_param_manifest.json from $(GOAGENT_DIR)/internal/cwmp/assets/"
+
+e2e: ## End-to-end test: happy scenario (up -> assert /health ok -> down; add VERBOSE=1 for per-check detail)
+	@./scripts/e2e.sh happy $(if $(filter 1,$(VERBOSE)),--verbose)
+
+e2e-scenario: ## Run one scenario e2e (SCENARIO=happy|ftp-path-reject|ftp-auth-fail|ftp-conn-fail|ftp-timeout|atc-fault|reboot; VERBOSE=1 for detail)
+	@./scripts/e2e.sh $(SCENARIO) $(if $(filter 1,$(VERBOSE)),--verbose)
+
+e2e-all: ## End-to-end sweep across all 7 scenarios (VERBOSE=1 for per-check detail; non-zero exit if any fail)
+	@./scripts/e2e.sh --all $(if $(filter 1,$(VERBOSE)),--verbose)
+
+verify: test-all e2e-all ## Full pre-PR gate: unit tests (both modules, fail-fast) THEN all 7 e2e scenarios
+	@echo "verify: unit + e2e all green"

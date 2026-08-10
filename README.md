@@ -9,7 +9,7 @@ CloudlyNet Edge Agent is a Go TR-069 edge process for attaching RadioDevices to 
 ```text
 Makefile
 Dockerfile
-docker-compose.yml
+docker-compose.test.yml   # local functional-test / validation harness (NOT prod)
 config/
   agent.yaml          # docker/test config (embeds a dev token)
   rules.yaml
@@ -29,12 +29,12 @@ goagent/
   internal/rules
   internal/collector
   internal/worker
-testsuite/
-  main.go
+testsuite/            # NanoLink emulator: mock cloud + mock CWMP device + FTP (drives e2e)
+  main.go             # entry; plus cloud.go / device.go / soap.go / ftp.go / config.go / manifest.go
+  loggen/             # real-shaped log-archive generator (own package + tests)
+  conf/ assets/ fixtures/
   Dockerfile
 ```
-
-The prompt used `testsuire`; the implemented directory is the corrected `testsuite/`.
 
 ## Runtime Behavior
 
@@ -49,7 +49,7 @@ The prompt used `testsuire`; the implemented directory is the corrected `testsui
 - Uses local SQLite for telemetry outbox retry, applied-command dedupe, and the CWMP device/parameter/event store.
 - **Is the ACS:** it answers the device's Inform and `AutonomousTransferComplete` (the RPC GenieACS never handled), reads via `GetParameterValues`, writes via `SetParameterValues`, walks `GetParameterNames` once on first contact for authoritative writability, and reboots — all over the in-agent `:7547` listener. An optional connection-request trigger sharpens apply latency below the device's ~60 s inform cadence.
 - Emits an `autonomous_transfer_complete` event on each ATC into the telemetry batch (smo-sim ingests it).
-- Parses FTP `.tgz` logs into deterministic telemetry events using `config/rules.yaml`; the processed-archive set is pruned to the current directory contents so it stays bounded.
+- Parses FTP log uploads into deterministic telemetry events using `config/rules.yaml` — the routine periodic feed (`Log_*.gz`/`ErrorLog_*.gz`, single-file gzip), the reboot-dump `continuouslogging.tgz` ring, and the bare `Devicelog`; the module is read from each line's inline `[MODULE]` tag and the device from the filename's OUI+serial, and the processed-upload set is pruned to the current directory contents so it stays bounded.
 
 ## Telemetry tiering (handover §3.4)
 
@@ -98,39 +98,55 @@ The agent binds `CWMP_LISTEN` (default `0.0.0.0:7547`) — the exact address the
 NanoLink dials — so any prior ACS on that port must be stopped first (see
 **Migration from GenieACS**). The FTP log-drop dir is assumed to already exist.
 
-Common `make` targets: `build`, `test`, `vet`, `run`, `install`, `uninstall`,
-`docker-build`, `docker-up`, `docker-down`, `docker-logs` (`make help` lists all).
+Common `make` targets: `build`, `test`, `test-suite`, `vet`, `run`, `install`, `uninstall`,
+`docker-build`, `docker-up`, `docker-down`, `docker-logs`, `e2e`, `e2e-scenario`, `e2e-all`, `verify`
+(`make help` lists all).
 
 Remove with `sudo ./scripts/uninstall.sh` (add `--purge` to also drop config,
 data, and the user).
 
 ## Local Functional Test
 
+The stack lives in `docker-compose.test.yml` (a **test/validation harness**, not a production
+deploy — production is `scripts/install.sh` + systemd). One command runs the full gate:
+
 ```bash
-docker compose up -d --build
-curl http://localhost:9000/health
-docker compose down -v
+make verify   # unit tests (agent) + unit tests (testsuite) + e2e sweep (7 scenarios)
 ```
+
+Or a lighter loop: `make e2e` (happy only) / `make e2e-all` (7 scenarios). These `make` targets are
+**self-contained** — they run against the mock cloud and **ignore any `.env`** (so a real-cloud `.env`
+can't derail them); for a real-cloud run see **Live Platform Validation** below. The raw form:
+
+```bash
+docker compose -f docker-compose.test.yml up -d --build
+curl http://localhost:9000/health
+docker compose -f docker-compose.test.yml down -v
+```
+
+See [`testsuite/README.md`](testsuite/README.md) for scenarios, `/health` fields, and debug modes.
 
 The testsuite container mocks the CloudlyNet `/v1/agent/**` cloud on port `9000` **and plays a mock NanoLink CWMP device** that dials the agent's in-agent ACS at `:7547` (Inform → ATC → GPV/SPV/GPN/Reboot), plus a connection-request listener on `:30005`. The health response becomes `ok: true` after the agent has registered, sent heartbeat/telemetry/snapshots, acked configure/query/reboot commands over CWMP, and delivered all 24 managed configuration paths — with the ATC session completing (no Fault).
 
 ## Live Platform Validation
 
-Use `EDGEAGENT_TESTSUITE_MODE=acsftp` when CloudlyNet/NetAI is already deployed and only the local CWMP device + FTP should be mocked (the agent talks to a real cloud). The testsuite health endpoint remains on `9000`, but `/v1/agent/**` is not mocked in this mode.
+The second way to run the suite: `EDGEAGENT_TESTSUITE_MODE=acsftp` mocks only the local CWMP device +
+FTP and points the agent at an **already-deployed** cloud (the mock `/v1/agent/**` is off; health stays
+on `9000`). Unlike the `make` gate above, this is a manual `docker compose up` driven by `.env`:
 
 ```bash
-EDGEAGENT_TESTSUITE_MODE=acsftp \
-CLOUDLYNET_ENROLLMENT_TOKEN='<enrollment-token>' \
-docker compose up -d --build cloudlynet-edgeagent-testsuite cloudlynet-edgeagent
+cp .env.example .env
+# edit .env: set CLOUDLYNET_ENROLLMENT_TOKEN (dashboard "add device"); MODE is already acsftp
+docker compose -f docker-compose.test.yml up -d --build cloudlynet-edgeagent-testsuite cloudlynet-edgeagent ftp ftp-init
 
 curl http://localhost:9000/health
-docker compose logs -f cloudlynet-edgeagent
+docker compose -f docker-compose.test.yml logs -f cloudlynet-edgeagent
 ```
 
-Production enrollment tokens should embed `https://netai.cloudly.io/`. If you are validating an
-older token that still contains `http://localhost:8080`, temporarily add
-`CLOUDLYNET_BASE_URL='https://netai.cloudly.io/'` to the command above; regenerate the edge key in
-the dashboard after SMO Sim is deployed with the corrected `PUBLIC_BASE_URL`.
+Production enrollment tokens should embed `https://netai.cloudly.io/` (the `.env.example` default). If
+you validate an older token that still contains `http://localhost:8080`, set `CLOUDLYNET_BASE_URL` in
+`.env`; regenerate the edge key in the dashboard after SMO Sim is deployed with the corrected
+`PUBLIC_BASE_URL`. Full option list: [`testsuite/README.md`](testsuite/README.md).
 
 ## Migration from GenieACS (on-box, server-side only — no device change)
 

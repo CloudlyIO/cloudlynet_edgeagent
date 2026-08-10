@@ -1,0 +1,141 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL FUNCTIONAL-TEST / VALIDATION HARNESS — NOT a production deploy.
+#
+# Brings up the agent-under-test alongside its MOCKS (mock cloud + mock NanoLink
+# CPE, both in `…-testsuite`) and a REAL vsftpd, so `make e2e` / `make e2e-all`
+# can drive the agent end to end. The agent service below is wired to the mock
+# cloud (`:9000`) — this is NOT a way to run the agent for real.
+#
+# Production runs the agent as a systemd binary on the edge box via
+# `scripts/install.sh` (see `deploy/` + README → "Edge Device Install"); the real
+# box runs its own vsftpd. Nothing in this file runs in production.
+#
+# The `make` targets and `scripts/e2e.sh` point at this file via COMPOSE_FILE;
+# a bare `docker compose` needs `-f docker-compose.test.yml`.
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  cloudlynet-edgeagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cloudlynet_edgeagent
+    restart: unless-stopped
+    environment:
+      CLOUDLYNET_ENROLLMENT_TOKEN: ${CLOUDLYNET_ENROLLMENT_TOKEN:-eyJ2IjoxLCJ0ZW5hbnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMzAyOS0wMDAwMDAwMDAwMDEiLCJlZGdlX2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIiwiYmFzZV91cmwiOiJodHRwOi8vY2xvdWRseW5ldC1lZGdlYWdlbnQtdGVzdHN1aXRlOjkwMDAiLCJhcGlfa2V5IjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExLmRldnNlY3JldCJ9}
+      CLOUDLYNET_BASE_URL: ${CLOUDLYNET_BASE_URL:-http://cloudlynet-edgeagent-testsuite:9000}
+      CWMP_LISTEN: 0.0.0.0:7547
+      # The mock device's connection-request listener; sharpens command latency.
+      CWMP_CR_URL_OVERRIDE: http://cloudlynet-edgeagent-testsuite:30005/
+      FTP_WATCH_DIR: /srv/nybsys-ftp/nybsysftp/uploads
+      BUFFER_DB: /var/lib/cloudlynet-agent/buffer.sqlite
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${EDGEAGENT_CWMP_PORT:-7547}:7547"
+    volumes:
+      - edgeagent_buffer:/var/lib/cloudlynet-agent
+      - edgeagent_ftp:/srv/nybsys-ftp/nybsysftp/uploads
+    depends_on:
+      cloudlynet-edgeagent-testsuite:
+        condition: service_healthy
+      ftp:
+        condition: service_healthy
+    networks:
+      - cloudlynet-edge
+
+  cloudlynet-edgeagent-testsuite:
+    build:
+      context: ./testsuite
+      dockerfile: Dockerfile
+    container_name: cloudlynet_edgeagent_testsuite
+    restart: unless-stopped
+    environment:
+      FTP_DIR: /ftp
+      TESTSUITE_MODE: ${EDGEAGENT_TESTSUITE_MODE:-full}
+      # The mock NanoLink device dials the agent's in-agent CWMP ACS.
+      AGENT_CWMP_URL: http://cloudlynet-edgeagent:7547/
+      # The mock device curl-uploads logs to the FTP root, like the real NanoLink.
+      FTP_HOST: ftp
+      FTP_USER: ${FTP_USER:-nybsys}
+      FTP_PASS: ${FTP_PASS:-nybsys-local-test}
+      # One of: happy | ftp-path-reject | ftp-auth-fail | ftp-conn-fail |
+      # ftp-timeout | atc-fault | reboot (see testsuite/README.md).
+      NANOLINK_SCENARIO: ${EDGEAGENT_TESTSUITE_SCENARIO:-happy}
+      # Device identity for acsftp (distinct cwmp_ids). Empty = conf default.
+      NANOLINK_OUI: ${EDGEAGENT_TESTSUITE_OUI:-}
+      NANOLINK_PRODUCT_CLASS: ${EDGEAGENT_TESTSUITE_PRODUCT_CLASS:-}
+      NANOLINK_SERIAL: ${EDGEAGENT_TESTSUITE_SERIAL:-}
+    ports:
+      - "${EDGEAGENT_TESTSUITE_PORT:-9000}:9000"
+    depends_on:
+      ftp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - cloudlynet-edge
+
+  # One-shot: stages the /uploads dir the "ftp-path-reject" scenario targets.
+  # It must EXIST but be write-protected — CWD succeeds, STOR fails — to
+  # reproduce curl (25) (STOR denied) rather than curl (9) (CWD denied, if
+  # the dir were simply absent). Matches the real box: the corpus's /uploads
+  # curl(25) failures were STOR-denied, not missing-directory failures.
+  ftp-init:
+    image: alpine:3.20
+    container_name: cloudlynet_edgeagent_ftp_init
+    command: ["sh", "-c", "mkdir -p /data/uploads && chown 0:0 /data/uploads && chmod 555 /data/uploads"]
+    volumes:
+      - edgeagent_ftp:/data
+    networks:
+      - cloudlynet-edge
+
+  # vsftpd ingress: the mock device curl-uploads real-shaped log archives here,
+  # exactly like the real NanoLink; vsftpd writes into the shared edgeagent_ftp
+  # volume the agent's WatchFTP polls. No agent code change — the agent still
+  # just watches a directory.
+  #
+  # Image: delfer/alpine-ftp-server (real vsftpd on Alpine, genuinely
+  # multi-arch amd64/arm64). fauria/vsftpd (CentOS7/amd64-only) was tried
+  # first but crashes under Rosetta/QEMU x86 emulation on Apple Silicon dev
+  # boxes ("rosetta error: mmap_anonymous_rw mmap failed") — an emulation
+  # bug, not a config issue, but it blocks local validation on those laptops.
+  ftp:
+    image: delfer/alpine-ftp-server
+    container_name: cloudlynet_edgeagent_ftp
+    restart: unless-stopped
+    environment:
+      # user|password|home-dir — home dir is the FTP root == the agent's watch dir.
+      USERS: ${FTP_USER:-nybsys}|${FTP_PASS:-nybsys-local-test}|/home/vsftpd/nybsys
+      # ADDRESS names the compose service; the image's vsftpd.conf already sets
+      # pasv_addr_resolve=YES so a service name (not a raw IP) resolves.
+      # Bounded passive-port range is the knob that produces a real curl
+      # (25)/(28) when misconfigured.
+      ADDRESS: ftp
+      MIN_PORT: "21100"
+      MAX_PORT: "21110"
+    volumes:
+      # FTP root "/" == the agent's watch dir (both mount the same volume).
+      - edgeagent_ftp:/home/vsftpd/nybsys
+    depends_on:
+      ftp-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # 127.0.0.1, not localhost: vsftpd here only listens on IPv4 and
+      # "localhost" resolves to ::1 first in this image, giving a false unhealthy.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 21 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - cloudlynet-edge
+
+volumes:
+  edgeagent_buffer:
+  edgeagent_ftp:
+
+networks:
+  cloudlynet-edge:
+    driver: bridge
