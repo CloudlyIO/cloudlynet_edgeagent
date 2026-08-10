@@ -38,41 +38,22 @@ var inventoryStatusPaths = []string{pathRFTxStatus, pathOpState, pathLANIP, path
 // before falling back to the last cached values.
 const snapshotAwait = 10 * time.Second
 
-// SnapshotPaths is the complete curated managed-parameter catalogue shown by the
-// NanoLink Config tab. Keep this list aligned with SMO Sim's MANAGED_PARAMS and
-// the frontend managed-params.ts catalogue; status/telemetry paths do not belong
-// in a configuration snapshot.
-var SnapshotPaths = []string{
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.PhyCellID",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNDL",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNUL",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.FreqBandIndicator",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.DLBandwidth",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ULBandwidth",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.ReferenceSignalPower",
-	"Device.Services.FAPService.1.Capabilities.MaxTxPower",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pa",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.PHY.PDSCH.Pb",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXEnabled",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.OnDurationTimer",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.DRXInactivityTimer",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.LongDRXCycle",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.DRX.ShortDRXCycle",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.MAC.X_8C1F64_PCH.DefaultPagingCycle",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.QRxLevMinSIB1",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.IdleMode.IntraFreq.SIntraSearch",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A2ThresholdRSRP",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.A1ThresholdRSRP",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.Hysteresis",
-	"Device.Services.FAPService.1.CellConfig.LTE.RAN.Mobility.ConnMode.EUTRA.TimeToTrigger",
-	"Device.ManagementServer.PeriodicInformInterval",
-	autonomousTransferCompletePolicy,
-}
+// SnapshotPaths is the curated managed-parameter catalogue shown by the NanoLink Config
+// tab. It is an alias for the GENERATED ManagedPaths (see managed_paths.go), which is
+// derived from smo_sim's managed_params.py, the single write-validation gate. It used to
+// be a hand-maintained copy. Status and telemetry paths do not belong in a snapshot.
+var SnapshotPaths = ManagedPaths
 
-// maxDeferTicks bounds how long scanFTP defers an upload from a not-yet-known
-// device (~30 ticks at the 2s poll interval == ~60s), matching the real
-// device's own Inform/upload cadence so a cold-start race resolves on its own.
+// maxDeferTicks is scanFTP's FAST resolution window for an upload from a
+// not-yet-known device (~30 ticks at the 2s poll interval == ~60s), matching
+// the real device's own Inform/upload cadence so a cold-start race resolves on
+// its own. Past the window the upload stays deferred — retried every
+// resolveRetryTicks — never emitted under a made-up id (see scanFTP).
 const maxDeferTicks = 30
+
+// resolveRetryTicks is the slow retry cadence once the fast window is spent
+// (~30 ticks == ~60s between device-store lookups per unresolved file).
+const resolveRetryTicks = 30
 
 // maxParseRetries bounds how many polls a failing parse is retried before the
 // upload is given up on. A real curl→vsftpd STOR is non-atomic, so a 2s poll
@@ -235,16 +216,27 @@ func (c *Collector) scanFTP() {
 			continue
 		}
 
+		if tick := c.deferred[path]; tick >= maxDeferTicks && (tick-maxDeferTicks)%resolveRetryTicks != 0 {
+			// Past the fast window: retry resolution only every
+			// resolveRetryTicks polls — no per-poll SQLite lookup for a file
+			// that may never resolve.
+			c.deferred[path]++
+			continue
+		}
 		deviceID, known := c.resolveDeviceID(path)
 		if !known {
+			// Not yet onboarded (Inform hasn't landed): keep the file in place
+			// and re-try, indefinitely. It is NEVER emitted under a made-up id:
+			// a telemetry batch keyed to a cwmp_id the cloud doesn't know can be
+			// rejected, and the strictly-ordered outbox would wedge behind it,
+			// blocking all later telemetry. Bookkeeping stays bounded by the
+			// directory contents, and the upload is ingested on the canonical
+			// id if the device's Inform ever lands.
 			c.deferred[path]++
-			if c.deferred[path] < maxDeferTicks {
-				// Not yet onboarded (Inform hasn't landed): re-scanned next poll
-				// rather than silently dropped or mis-keyed to a phantom device.
-				continue
+			if c.deferred[path] == maxDeferTicks {
+				log.Printf("ftp upload unresolved after %d polls (no matching Inform); leaving it in place, retrying every %d polls: %s", maxDeferTicks, resolveRetryTicks, path)
 			}
-			deviceID = unresolvedID(path)
-			log.Printf("ftp upload from unresolved device after %d ticks; processing under sentinel id %s: %s", maxDeferTicks, deviceID, path)
+			continue
 		}
 		events, err := c.parseUpload(path, deviceID)
 		if err != nil {
@@ -367,16 +359,16 @@ func (c *Collector) resolveDeviceID(path string) (canonicalID string, known bool
 // ouiSerialFromName extracts OUI+serial from a real upload filename, handling
 // both real shapes:
 //   - reboot dump / alarm log "<OUI>_<serial>_PowerOn_…": the leading two
-//     _-tokens ("8C1F64_2205600282_PowerOn_…_continuouslogging.tgz").
+//     _-tokens ("8C1F64_2205609999_PowerOn_…_continuouslogging.tgz").
 //   - periodic feed "Log_<date>.<time>+<tz>_<OUI>.<serial>.gz": the OUI.serial
-//     pair is the LAST _-token, dot-joined ("…_8C1F64.2205600282.gz"). A
+//     pair is the LAST _-token, dot-joined ("…_8C1F64.2205609999.gz"). A
 //     leading-_-split would wrongly yield oui="Log" here — hence the shape split.
 func ouiSerialFromName(path string) (oui, serial string) {
 	base := filepath.Base(path)
 	if isPeriodicLog(base) {
 		tail := strings.TrimSuffix(base, ".gz")
 		if i := strings.LastIndexByte(tail, '_'); i >= 0 {
-			tail = tail[i+1:] // "8C1F64.2205600282"
+			tail = tail[i+1:] // "8C1F64.2205609999"
 		}
 		o, s, ok := strings.Cut(tail, ".")
 		if !ok {
@@ -392,12 +384,24 @@ func ouiSerialFromName(path string) (oui, serial string) {
 	return parts[0], parts[1]
 }
 
-// unresolvedID is the sentinel used once a deferred upload exhausts
-// maxDeferTicks — an orphan log is loudly surfaced, never silently dropped or
-// mis-keyed to a phantom device.
-func unresolvedID(path string) string {
-	oui, serial := ouiSerialFromName(path)
-	return "unresolved:" + oui + "_" + serial
+// occurrenceBucket returns the upload's occurrence discriminator for dedup
+// keys: the date carried in the periodic filename ("Log_<date>.<time>…"), else
+// the file's mtime day (UTC). Re-parsing the SAME file (agent restart) and the
+// Log∩ErrorLog overlap of one cycle yield the same bucket, while a
+// byte-identical fault line recurring in a later day's upload gets a new one —
+// see rules.dedup.
+func occurrenceBucket(path string) string {
+	base := filepath.Base(path)
+	if isPeriodicLog(base) {
+		rest := strings.TrimPrefix(strings.TrimPrefix(base, "ErrorLog_"), "Log_")
+		if date, _, ok := strings.Cut(rest, "."); ok && len(date) == 8 {
+			return date
+		}
+	}
+	if fi, err := os.Stat(path); err == nil {
+		return fi.ModTime().UTC().Format("20060102")
+	}
+	return ""
 }
 
 // eventsFromArchive reads the gzip-tar reboot/power-on ring dump (numbered
@@ -416,6 +420,7 @@ func (c *Collector) eventsFromArchive(path, deviceID string) ([]cloud.EventItem,
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	bucket := occurrenceBucket(path)
 	var out []cloud.EventItem
 	for {
 		h, err := tr.Next()
@@ -433,7 +438,7 @@ func (c *Collector) eventsFromArchive(path, deviceID string) ([]cloud.EventItem,
 			return nil, err
 		}
 		lines := strings.Split(string(b), "\n")
-		out = append(out, c.rules.Apply(lines, deviceID)...)
+		out = append(out, c.rules.Apply(lines, deviceID, bucket)...)
 	}
 }
 
@@ -458,7 +463,7 @@ func (c *Collector) eventsFromGzipLog(path, deviceID string) ([]cloud.EventItem,
 		return nil, err
 	}
 	lines := strings.Split(string(b), "\n")
-	return c.rules.Apply(lines, deviceID), nil
+	return c.rules.Apply(lines, deviceID, occurrenceBucket(path)), nil
 }
 
 // eventsFromLog handles a bare (non-archive) upload — the real Devicelog,
@@ -472,7 +477,7 @@ func (c *Collector) eventsFromLog(path, deviceID string) ([]cloud.EventItem, err
 		return nil, err
 	}
 	lines := strings.Split(string(b), "\n")
-	return c.rules.Apply(lines, deviceID), nil
+	return c.rules.Apply(lines, deviceID, occurrenceBucket(path)), nil
 }
 
 // ToAnyMap widens a CWMP string param map to the map[string]any the cloud DTOs

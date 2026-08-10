@@ -8,7 +8,7 @@ import (
 )
 
 func TestSendSnapshotEscapesLiteralPercentInCWMPIdentifier(t *testing.T) {
-	const cwmpID = "8C1F64-ENB%2DN03002%2DB3-2205600282"
+	const cwmpID = "8C1F64-ENB%2DN03002%2DB3-2205609999"
 	var escapedPath string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -30,7 +30,7 @@ func TestSendSnapshotEscapesLiteralPercentInCWMPIdentifier(t *testing.T) {
 		t.Fatalf("SendSnapshot() error = %v", err)
 	}
 
-	want := "/v1/agent/devices/8C1F64-ENB%252DN03002%252DB3-2205600282/config-snapshot"
+	want := "/v1/agent/devices/8C1F64-ENB%252DN03002%252DB3-2205609999/config-snapshot"
 	if escapedPath != want {
 		t.Fatalf("escaped request path = %q, want %q", escapedPath, want)
 	}

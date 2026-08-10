@@ -1,6 +1,9 @@
 package cwmp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // fakeStore is an in-memory Store for exercising the session state machine.
 type fakeStore struct {
@@ -64,7 +67,7 @@ func TestOnInformFirstContactEnqueuesGPN(t *testing.T) {
 	if _, ok := resp.(*InformResponse); !ok {
 		t.Fatalf("Inform response = %T, want *InformResponse", resp)
 	}
-	wantID := "8C1F64-ENB%2DN03002%2DB3-2205600282"
+	wantID := "8C1F64-ENB%2DN03002%2DB3-2205609999"
 	if s.DeviceID != wantID {
 		t.Errorf("DeviceID = %q, want %q", s.DeviceID, wantID)
 	}
@@ -89,7 +92,7 @@ func TestOnInformFirstContactEnqueuesGPN(t *testing.T) {
 
 func TestOnInformNoGPNWhenWritabilityKnown(t *testing.T) {
 	store := newFakeStore()
-	store.writability["8C1F64-ENB%2DN03002%2DB3-2205600282"] = true
+	store.writability["8C1F64-ENB%2DN03002%2DB3-2205609999"] = true
 	s := newTestSession(store)
 	env, _ := DecodeEnvelope([]byte(informXML))
 	s.Handle(env)
@@ -215,5 +218,24 @@ func TestFaultFinishesInflightWithError(t *testing.T) {
 		}
 	default:
 		t.Error("a CPE Fault on an inflight task should publish a failed TaskResult")
+	}
+}
+
+// TestFormatWritesRedactsSecrets: TR-069 carries credentials in the clear
+// (ManagementServer passwords, Wi-Fi passphrases); the SPV trace log must
+// never persist a cloud-pushed rotation in plaintext.
+func TestFormatWritesRedactsSecrets(t *testing.T) {
+	got := formatWrites([]ParameterValueStruct{
+		{Name: "Device.ManagementServer.ConnectionRequestPassword", Value: ValueNode{Text: "s3cret"}},
+		{Name: "Device.ManagementServer.PeriodicInformInterval", Value: ValueNode{Text: "300"}},
+	})
+	if strings.Contains(got, "s3cret") {
+		t.Fatalf("secret value leaked into the SPV trace: %q", got)
+	}
+	if !strings.Contains(got, "ConnectionRequestPassword=<redacted>") {
+		t.Errorf("secret param not redacted: %q", got)
+	}
+	if !strings.Contains(got, "PeriodicInformInterval=300") {
+		t.Errorf("non-secret value must stay readable for the TR-069 trace: %q", got)
 	}
 }

@@ -1,3 +1,7 @@
+# Rule-file schema version. v2: `module:` matches each line's inline "[MODULE]"
+# tag (v1 matched the archive entry filename — v1 files can never fire under
+# this engine, so the agent refuses them and runs its built-in defaults).
+version: 2
 rules:
   # Real ACS-failure lines live in TR69 (not FM); the vendor IP no longer
   # gates the match — IP-agnostic on module+text (keep in lockstep with

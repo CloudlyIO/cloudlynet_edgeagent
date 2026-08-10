@@ -213,13 +213,33 @@ func (s *Session) nextTask() interface{} {
 	return nil
 }
 
-// formatWrites renders SPV writes as "name=value, …" for the TR-069 log.
+// formatWrites renders SPV writes as "name=value, …" for the TR-069 log,
+// redacting secret parameters: TR-069 carries credentials in the clear
+// (Device.ManagementServer.Password, ConnectionRequestPassword, Wi-Fi
+// KeyPassphrase, …), and journald/shipped container logs must never hold a
+// cloud-pushed rotation in plaintext.
 func formatWrites(writes []ParameterValueStruct) string {
 	parts := make([]string, len(writes))
 	for i, w := range writes {
-		parts[i] = w.Name + "=" + w.Value.Text
+		v := w.Value.Text
+		if isSecretParam(w.Name) {
+			v = "<redacted>"
+		}
+		parts[i] = w.Name + "=" + v
 	}
 	return strings.Join(parts, ", ")
+}
+
+// isSecretParam reports whether a TR-069 parameter path carries a credential.
+// Name-based, matching the vendor's own isTr69Password flagging: any path whose
+// last segments mention a password/passphrase/key-passphrase/shared secret.
+func isSecretParam(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "password") ||
+		strings.Contains(n, "passphrase") ||
+		strings.Contains(n, "presharedkey") ||
+		strings.Contains(n, "wepkey") ||
+		strings.Contains(n, "secret")
 }
 
 func eventCodes(ev []EventStruct) []string {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -26,16 +27,27 @@ type Engine struct {
 	rules []Rule
 }
 
+// rulesVersion is the rule-file schema this engine executes. Version 2 changed
+// the matching semantics incompatibly: `module:` now matches the inline
+// per-LINE "[MODULE]" tag, not the archive entry filename, so a v1 file's
+// rules can silently never fire. Load refuses anything else; the caller falls
+// back to DefaultEngine (main.go logs the reason).
+const rulesVersion = 2
+
 func Load(path string) (*Engine, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var cfg struct {
-		Rules []Rule `yaml:"rules"`
+		Version int    `yaml:"version"`
+		Rules   []Rule `yaml:"rules"`
 	}
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, err
+	}
+	if cfg.Version != rulesVersion {
+		return nil, fmt.Errorf("rules file %s declares version %d, this agent needs version %d (module now matches the per-line [MODULE] tag, not the filename) — migrate custom rules against rules.yaml.default and add 'version: %d'", path, cfg.Version, rulesVersion, rulesVersion)
 	}
 	return compile(cfg.Rules)
 }
@@ -84,7 +96,10 @@ func moduleFromLine(line string) string {
 	return m[1]
 }
 
-func (e *Engine) Apply(lines []string, deviceHint string) []cloud.EventItem {
+// Apply classifies lines for one upload. bucket is the upload's occurrence
+// discriminator (its date, see collector.occurrenceBucket) folded into every
+// event's dedup key.
+func (e *Engine) Apply(lines []string, deviceHint, bucket string) []cloud.EventItem {
 	now := time.Now().UTC().Format(time.RFC3339)
 	var out []cloud.EventItem
 	for _, line := range lines {
@@ -98,18 +113,18 @@ func (e *Engine) Apply(lines []string, deviceHint string) []cloud.EventItem {
 			if !strings.EqualFold(r.Module, module) || !r.re.MatchString(line) {
 				continue
 			}
-			out = append(out, event(deviceHint, now, module, r.EventType, r.Severity, r.Message, line))
+			out = append(out, event(deviceHint, now, module, r.EventType, r.Severity, r.Message, line, bucket))
 			matched = true
 			break
 		}
 		if !matched && alarmy(line) {
-			out = append(out, event(deviceHint, now, module, "unclassified", "warning", "", line))
+			out = append(out, event(deviceHint, now, module, "unclassified", "warning", "", line, bucket))
 		}
 	}
 	return out
 }
 
-func event(device, ts, module, eventType, severity, message, raw string) cloud.EventItem {
+func event(device, ts, module, eventType, severity, message, raw, bucket string) cloud.EventItem {
 	if device == "" {
 		device = "unknown"
 	}
@@ -121,7 +136,7 @@ func event(device, ts, module, eventType, severity, message, raw string) cloud.E
 		Severity:  severity,
 		Message:   message,
 		Attrs:     map[string]any{"raw": raw},
-		DedupKey:  dedup(device, eventType, raw),
+		DedupKey:  dedup(device, eventType, bucket, raw),
 	}
 }
 
@@ -130,14 +145,21 @@ func alarmy(line string) bool {
 	return strings.Contains(l, "alarm") || strings.Contains(l, "fault") || strings.Contains(l, "fail") || strings.Contains(l, "error")
 }
 
-// dedup builds a CONTENT-derived dedup key: (device, eventType, raw). It
-// deliberately omits parse time — the raw line already carries the device's own
-// sequence number + timestamp, so the same log line yields the same key whether
-// it arrives via the continuous ring or the Devicelog (they overlap on the real
-// device) or is re-parsed after an agent restart. The cloud dedups on this key
+// dedup builds a CONTENT+OCCURRENCE-derived dedup key: (device, eventType,
+// bucket, raw). It deliberately omits parse time — the raw line carries the
+// device's own sequence number + timestamp, so the same log line yields the
+// same key whether it arrives via the Log or its overlapping ErrorLog slice, or
+// is re-parsed after an agent restart. The cloud dedups on this key
 // (ON CONFLICT(dedup_key)); a parse-time component would defeat that.
-func dedup(device, eventType, raw string) string {
+//
+// bucket (the upload's own date) is the occurrence discriminator: a box whose
+// clock/sequence counter resets on every boot re-emits byte-identical fault
+// lines, and a purely content-derived key would swallow every recurrence after
+// the first, forever. Folding in the upload date keeps the overlap/re-parse
+// dedup (same upload day) while a recurrence on a later day surfaces again.
+// A byte-identical recurrence within the same day is still collapsed — accepted.
+func dedup(device, eventType, bucket, raw string) string {
 	lineHash := sha1.Sum([]byte(raw))
-	h := sha256.Sum256([]byte(device + "|" + eventType + "|" + hex.EncodeToString(lineHash[:])))
+	h := sha256.Sum256([]byte(device + "|" + eventType + "|" + bucket + "|" + hex.EncodeToString(lineHash[:])))
 	return hex.EncodeToString(h[:])
 }

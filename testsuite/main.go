@@ -68,7 +68,7 @@ func main() {
 		log.Fatal(http.ListenAndServe(":9000", acsHealthMux(dev, ftpDir, mode, agentURL)))
 	}
 	log.Printf("mock cloud listening on :9000; mock device dialing agent at %s", agentURL)
-	log.Fatal(http.ListenAndServe(":9000", cloudMux(st)))
+	log.Fatal(http.ListenAndServe(":9000", cloudMux(st, dev)))
 }
 
 func env(key, fallback string) string {

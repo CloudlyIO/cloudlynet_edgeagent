@@ -20,7 +20,7 @@ const informXML = `<?xml version="1.0" encoding="UTF-8"?>
 <Manufacturer>NybSys</Manufacturer>
 <OUI>8C1F64</OUI>
 <ProductClass>ENB-N03002-B3</ProductClass>
-<SerialNumber>2205600282</SerialNumber>
+<SerialNumber>2205609999</SerialNumber>
 </DeviceID>
 <Event soap:arrayType="cwmp:EventStruct[1]">
 <EventStruct><EventCode>2 PERIODIC</EventCode><CommandKey></CommandKey></EventStruct>
@@ -101,7 +101,7 @@ func TestDecodeInform(t *testing.T) {
 	if inf == nil {
 		t.Fatal("Inform not decoded")
 	}
-	if inf.DeviceID.OUI != "8C1F64" || inf.DeviceID.ProductClass != "ENB-N03002-B3" || inf.DeviceID.SerialNumber != "2205600282" {
+	if inf.DeviceID.OUI != "8C1F64" || inf.DeviceID.ProductClass != "ENB-N03002-B3" || inf.DeviceID.SerialNumber != "2205609999" {
 		t.Errorf("DeviceID = %+v", inf.DeviceID)
 	}
 	if len(inf.Event) != 1 || inf.Event[0].EventCode != "2 PERIODIC" {

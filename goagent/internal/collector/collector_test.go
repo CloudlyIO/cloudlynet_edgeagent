@@ -14,9 +14,9 @@ import (
 
 const (
 	testOUI          = "8C1F64"
-	testSerial       = "2205600282"
+	testSerial       = "2205609999"
 	testProductClass = "ENB-N03002-B3"
-	testCanonicalID  = "8C1F64-ENB%2DN03002%2DB3-2205600282"
+	testCanonicalID  = "8C1F64-ENB%2DN03002%2DB3-2205609999"
 )
 
 // writeRingArchive builds a real-shaped gzipped tar with numbered ring entries
@@ -225,11 +225,13 @@ func TestResolveDeviceIDRejectsOUISuperstringCollision(t *testing.T) {
 	}
 }
 
-// TestScanFTPDefersUnknownDeviceThenExhausts covers the onboard-before-log
-// ordering: an upload from a not-yet-onboarded device must be deferred (not
-// consumed) each tick, and only processed under the "unresolved:" sentinel
-// once the deferral cap is exhausted — never silently dropped or mis-keyed.
-func TestScanFTPDefersUnknownDeviceThenExhausts(t *testing.T) {
+// TestScanFTPKeepsDeferringUnknownDevice covers the onboard-before-log
+// ordering: an upload from a never-onboarded device stays deferred
+// indefinitely — never emitted under a made-up id (a telemetry batch keyed to
+// a cwmp_id the cloud doesn't know can be rejected, wedging the
+// strictly-ordered outbox behind it forever) and never marked seen, so it is
+// ingested on the canonical id if the device's Inform ever lands.
+func TestScanFTPKeepsDeferringUnknownDevice(t *testing.T) {
 	dir := t.TempDir()
 	c := newTestCollector(t, dir, false) // device NOT onboarded
 
@@ -237,40 +239,42 @@ func TestScanFTPDefersUnknownDeviceThenExhausts(t *testing.T) {
 	path := "Log_20240602.2311+0800_" + testOUI + "." + testSerial + ".gz"
 	writeGzipLog(t, dir, path, []string{"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)"})
 
-	for i := 0; i < maxDeferTicks-1; i++ {
+	// Run well past the fast window and through two slow retry cycles: still
+	// no events, never marked seen, still tracked as deferred.
+	for i := 0; i < maxDeferTicks+2*resolveRetryTicks; i++ {
 		c.scanFTP()
 		if events := c.DrainEvents(); len(events) != 0 {
-			t.Fatalf("tick %d: events = %+v, want none while deferred", i, events)
+			t.Fatalf("tick %d: events = %+v, want none while unresolved", i, events)
 		}
 	}
 	full := filepath.Join(dir, path)
-	if _, stillDeferred := c.deferred[full]; !stillDeferred {
-		t.Fatalf("expected path still tracked as deferred before cap exhaustion")
-	}
 	if _, seen := c.seenPaths[full]; seen {
-		t.Fatalf("path marked seen before deferral cap exhausted")
+		t.Fatalf("unresolved path must never be marked seen")
+	}
+	if _, stillDeferred := c.deferred[full]; !stillDeferred {
+		t.Fatalf("unresolved path must stay tracked as deferred")
 	}
 
-	// Final tick exhausts the cap: process under the sentinel id, mark seen.
-	c.scanFTP()
-	events := c.DrainEvents()
-	if len(events) != 1 {
-		t.Fatalf("events = %d after exhaustion, want 1: %+v", len(events), events)
+	// The device finally Informs: within one slow retry cycle the parked
+	// upload lands on the canonical id.
+	c.acs.Store().UpsertDevice(cwmp.DeviceRecord{
+		DeviceID: testCanonicalID, SerialNumber: testSerial, ProductClass: testProductClass,
+	})
+	ingested := false
+	for i := 0; i <= resolveRetryTicks && !ingested; i++ {
+		c.scanFTP()
+		if events := c.DrainEvents(); len(events) != 0 {
+			if len(events) != 1 || events[0].CWMPID != testCanonicalID {
+				t.Fatalf("events = %+v after late onboard, want exactly 1 on %s", events, testCanonicalID)
+			}
+			ingested = true
+		}
 	}
-	if events[0].CWMPID != "unresolved:"+testOUI+"_"+testSerial {
-		t.Errorf("CWMPID = %q, want unresolved sentinel", events[0].CWMPID)
+	if !ingested {
+		t.Fatalf("deferred upload never ingested after the device onboarded")
 	}
 	if _, seen := c.seenPaths[full]; !seen {
-		t.Errorf("path not marked seen after deferral exhaustion")
-	}
-	if _, stillDeferred := c.deferred[full]; stillDeferred {
-		t.Errorf("deferred counter not cleared after exhaustion")
-	}
-
-	// A subsequent tick must not re-process the now-seen path.
-	c.scanFTP()
-	if events := c.DrainEvents(); len(events) != 0 {
-		t.Fatalf("re-scanned an already-seen path: %+v", events)
+		t.Errorf("path not marked seen after successful ingest")
 	}
 }
 
@@ -342,10 +346,10 @@ func TestScanFTPErrorLogGzIngested(t *testing.T) {
 // device's OUI+serial (the periodic tail is dot-joined in the LAST _-token).
 func TestOUISerialFromNameBothShapes(t *testing.T) {
 	cases := []struct{ name, oui, serial string }{
-		{"8C1F64_2205600282_PowerOn_20240602_235010_continuouslogging.tgz", "8C1F64", "2205600282"},
-		{"8C1F64_2205600282_PowerOn_20240602_235010_Devicelog", "8C1F64", "2205600282"},
-		{"Log_20240602.2311+0800_8C1F64.2205600282.gz", "8C1F64", "2205600282"},
-		{"ErrorLog_20240613.1758+0800_8C1F64.2205600282.gz", "8C1F64", "2205600282"},
+		{"8C1F64_2205609999_PowerOn_20240602_235010_continuouslogging.tgz", "8C1F64", "2205609999"},
+		{"8C1F64_2205609999_PowerOn_20240602_235010_Devicelog", "8C1F64", "2205609999"},
+		{"Log_20240602.2311+0800_8C1F64.2205609999.gz", "8C1F64", "2205609999"},
+		{"ErrorLog_20240613.1758+0800_8C1F64.2205609999.gz", "8C1F64", "2205609999"},
 	}
 	for _, tc := range cases {
 		oui, serial := ouiSerialFromName(tc.name)
@@ -403,7 +407,7 @@ func TestScanFTPIgnoresForensicArtifacts(t *testing.T) {
 
 // TestScanFTPColdStartRace: the log arrives before Inform, then the device
 // onboards — the deferred upload must land on the correct device once known,
-// not the unresolved sentinel.
+// never under a made-up id.
 func TestScanFTPColdStartRace(t *testing.T) {
 	dir := t.TempDir()
 	c := newTestCollector(t, dir, false)

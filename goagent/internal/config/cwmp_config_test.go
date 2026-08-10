@@ -14,7 +14,7 @@ func TestCWMPDefaults(t *testing.T) {
 
 func TestApplyEnvCWMP(t *testing.T) {
 	t.Setenv("CWMP_LISTEN", "0.0.0.0:9999")
-	t.Setenv("CWMP_CR_USER", "8C1F64-ENB%2DN03002%2DB3-2205600282")
+	t.Setenv("CWMP_CR_USER", "8C1F64-ENB%2DN03002%2DB3-2205609999")
 	t.Setenv("CWMP_CR_PASS", "secret")
 	t.Setenv("CWMP_CR_URL_OVERRIDE", "http://192.168.8.248:30005/")
 	cfg := defaultConfig()
@@ -22,7 +22,7 @@ func TestApplyEnvCWMP(t *testing.T) {
 	if cfg.CWMP.Listen != "0.0.0.0:9999" {
 		t.Errorf("CWMP_LISTEN not applied: %q", cfg.CWMP.Listen)
 	}
-	if cfg.CWMP.CRUser != "8C1F64-ENB%2DN03002%2DB3-2205600282" || cfg.CWMP.CRPass != "secret" || cfg.CWMP.CRURLOverride != "http://192.168.8.248:30005/" {
+	if cfg.CWMP.CRUser != "8C1F64-ENB%2DN03002%2DB3-2205609999" || cfg.CWMP.CRPass != "secret" || cfg.CWMP.CRURLOverride != "http://192.168.8.248:30005/" {
 		t.Errorf("CWMP CR env not applied: %+v", cfg.CWMP)
 	}
 }

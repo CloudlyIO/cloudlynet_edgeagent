@@ -33,12 +33,14 @@ import (
 	"time"
 )
 
-// The redacted corpus was captured from a real device; these are the identity
-// tokens baked into its log CONTENT. rewriteIdentity swaps them for the
+// The corpus was captured from a real device and then anonymized: the serial and
+// MACs in fixtures/real_sample.log are the synthetic defaults (only the vendor OUI
+// and product class are real — public vendor-level data). These are the identity
+// tokens baked into the corpus log CONTENT; rewriteIdentity swaps them for the
 // configured device so the FTP logs read consistently (filenames already do).
 const (
 	corpusOUI          = "8C1F64"
-	corpusSerial       = "2205600282"
+	corpusSerial       = "2205609999"
 	corpusProductClass = "ENB-N03002-B3"
 )
 

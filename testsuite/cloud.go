@@ -57,8 +57,10 @@ var scenarioEventType = map[loggen.Scenario]string{
 
 const managedSnapshotParamCount = 24
 
-func cloudMux(st *state) http.Handler {
+func cloudMux(st *state, dev *device) http.Handler {
 	mux := http.NewServeMux()
+	// Fault injection / read-back, in both modes. See deviceParamsHandler.
+	mux.HandleFunc("/device/params", deviceParamsHandler(dev))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
@@ -195,6 +197,8 @@ func cloudMux(st *state) http.Handler {
 
 func acsHealthMux(dev *device, ftpDir, mode, agentURL string) http.Handler {
 	mux := http.NewServeMux()
+	// Fault injection / read-back. This is the mode EPIC-5's e2e and rollback demo run in.
+	mux.HandleFunc("/device/params", deviceParamsHandler(dev))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		// Count every real upload shape the emulator now emits: the routine
 		// periodic feed (Log_*.gz / ErrorLog_*.gz) plus any reboot-dump .tgz.

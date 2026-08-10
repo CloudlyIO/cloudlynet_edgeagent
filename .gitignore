@@ -1,2 +1,5 @@
 /bin/
 .env
+
+# Build artifact: `go build` output in testsuite/ (9.4 MB) — never commit it.
+testsuite/testsuite

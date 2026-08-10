@@ -251,7 +251,7 @@ device pushes (not the reboot-only `continuouslogging.tgz` dump, whose agent int
   failures / ACS / reboot / SCTP·SON faults) **verbatim** — the same lines also land in that cycle's
   `Log`, so the cloud's content-dedup collapses the overlap (correlated, like a real device).
 
-Content is a small **redacted real sample** (`fixtures/real_sample.log`) plus **synthetic per-module
+Content is a small **redacted, anonymized real sample** (`fixtures/real_sample.log`) plus **synthetic per-module
 filler** and the scenario's signature line (staged in every `Log`). Fidelity scope: `Log_*.gz` +
 `ErrorLog_*.gz` only; operational lines jittered / incident lines sticky (a fixed corpus — message text
 repeats, seq·ts·filename advance); cycle-based incident windows; single device. Real FTP credentials
@@ -281,7 +281,7 @@ names exist to signal intent (CWMP-only focus vs. CWMP+FTP against a real cloud)
 
 ## Validating against the real platform
 
-`full` mode is self-contained. To validate the live config loop against a **real** NetAI cloud — "add
+`full` mode is self-contained. To validate the live config loop against a **real** CloudlyNet cloud — "add
 this as a device and configure it from the dashboard", no lab hardware — run in `acsftp` mode: the mock
 cloud switches off and the testsuite plays only the mock NanoLink device (+ FTP), so the real agent
 talks to your platform.
