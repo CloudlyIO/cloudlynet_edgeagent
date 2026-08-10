@@ -35,7 +35,7 @@ Both carry the same line format:
   filename.
 - **message** — free text; a rule matches a substring of it (e.g. `curl code=(25)`).
 
-The **filename** carries OUI+serial dot-joined in the last `_`-token (`…_8C1F64.2205600282.gz`); the
+The **filename** carries OUI+serial dot-joined in the last `_`-token (`…_8C1F64.2205609999.gz`); the
 agent resolves the device from that tail (the date/time/tz are cosmetic — the parser ignores them).
 
 ## What goes into a generated slice — operational vs incident
@@ -85,10 +85,12 @@ event is present that run (staged in the always-uploaded `Log` feed); the fixtur
 
 ## The fixture
 
-`fixtures/real_sample.log` is a **small, redacted, real capture** sampled from the device's periodic
-`Log_*.gz` + `ErrorLog_*.gz` feed (captured as OUI `8C1F64`, serial `2205600282`) — hand-picked to
-cover the formats the agent must parse. `loggen` **rewrites that captured identity to the configured
-device** at generation, so the lines you see carry the run's OUI/serial (default `2205609999`):
+`fixtures/real_sample.log` is a **small, redacted and anonymized real capture** sampled from a device's
+periodic `Log_*.gz` + `ErrorLog_*.gz` feed — hand-picked to
+cover the formats the agent must parse. The capture's device identity (serial, MACs) was replaced with the synthetic
+defaults (vendor OUI `8C1F64` kept — it is public IEEE registry data and baked into `X_8C1F64_*`
+param names); `loggen` **rewrites the corpus identity to the configured device** at generation, so
+the lines you see carry the run's OUI/serial (default `2205609999`):
 
 - the FTP `curl` codes the periodic feed really emits — `(0)` success, `(7)` can't-connect,
   `(25)` STOR-denied, `(28)` timeout (`(67)` login-denied is not in the routine feed — it is staged

@@ -8,8 +8,8 @@ import "strings"
 // SQLite keys, cloud cwmp_id mapping, dashboard. It MUST byte-match the id the
 // previous ACS stored for this device, or the cloud re-onboards it as new.
 //
-//	CanonicalID("8C1F64", "ENB-N03002-B3", "2205600282")
-//	  == "8C1F64-ENB%2DN03002%2DB3-2205600282"
+//	CanonicalID("8C1F64", "ENB-N03002-B3", "2205609999")
+//	  == "8C1F64-ENB%2DN03002%2DB3-2205609999"
 func CanonicalID(oui, productClass, serial string) string {
 	enc := func(s string) string { return strings.ReplaceAll(s, "-", "%2D") }
 	return enc(oui) + "-" + enc(productClass) + "-" + enc(serial)

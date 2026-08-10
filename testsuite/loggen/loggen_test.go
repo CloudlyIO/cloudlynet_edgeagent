@@ -11,7 +11,7 @@ import (
 
 func testConfig(scenario Scenario) Config {
 	return Config{
-		OUI: "8C1F64", Serial: "2205600282", ProductClass: "ENB-N03002-B3",
+		OUI: "8C1F64", Serial: "2205609999", ProductClass: "ENB-N03002-B3",
 		At:       time.Date(2024, 6, 2, 23, 50, 10, 0, time.UTC),
 		Scenario: scenario,
 	}
@@ -34,7 +34,7 @@ func gunzipText(t *testing.T, gzBytes []byte) string {
 const (
 	opLine    = "0000000057 2024-06-02 11:25:29.190 [SCM] Process(pid=1843) tr69c started"                   // operational (non-error)
 	alarmLine = "0000000030 2024-06-02 07:07:38.097 [TR69] Alarm Report detail: ACS Disconnect with error 1" // incident (error)
-	uploadOK  = "0000001022 2024-06-03 00:42:14.467 [FILE_TRANS] File upload success, curl code=(0), command (curl -T /tmp/Log_20240603.0042+0800_8C1F64.2205600282.gz ftp://192.168.8.100/)"
+	uploadOK  = "0000001022 2024-06-03 00:42:14.467 [FILE_TRANS] File upload success, curl code=(0), command (curl -T /tmp/Log_20240603.0042+0800_8C1F64.2205609999.gz ftp://192.168.8.100/)"
 )
 
 // TestLogAndErrorLogNamesMatchRealShape locks the routine periodic-feed filename
@@ -42,10 +42,10 @@ const (
 // (single-file .gz, never a .tgz tar).
 func TestLogAndErrorLogNamesMatchRealShape(t *testing.T) {
 	cfg := testConfig(ScenarioHappy)
-	if got, want := cfg.LogName(), "Log_20240602.2350+0000_8C1F64.2205600282.gz"; got != want {
+	if got, want := cfg.LogName(), "Log_20240602.2350+0000_8C1F64.2205609999.gz"; got != want {
 		t.Errorf("LogName() = %q, want %q", got, want)
 	}
-	if got, want := cfg.ErrorLogName(), "ErrorLog_20240602.2350+0000_8C1F64.2205600282.gz"; got != want {
+	if got, want := cfg.ErrorLogName(), "ErrorLog_20240602.2350+0000_8C1F64.2205609999.gz"; got != want {
 		t.Errorf("ErrorLogName() = %q, want %q", got, want)
 	}
 	for _, n := range []string{cfg.LogName(), cfg.ErrorLogName()} {

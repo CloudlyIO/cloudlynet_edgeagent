@@ -1,5 +1,5 @@
 0000000000 2024-06-14 13:34:11.731 [SCM] ---------- eHNB power on (harddog enabled, SyncMode:Freedom, firmware-version V1.7.1, platform-version FSM9055.PX.3.0.3(r3.3p0.0.374.1),FSM9055.DV.3.0.3(r3.3), build-version branch[trunk_59960]-r60691, build-time 2024-05-06T08:51:28Z) ----------
-0000000001 2024-06-14 13:34:11.750 [SCM] [Device Status] manufacturer (Nybsys Inc), product-class (ENB-N03002-B3), oui (8C1F64), serial-number (2205600282), mac-addr (8C:1F:64:CF:60:07, 8C:1F:64:CF:60:08)
+0000000001 2024-06-14 13:34:11.750 [SCM] [Device Status] manufacturer (Nybsys Inc), product-class (ENB-N03002-B3), oui (8C1F64), serial-number (2205609999), mac-addr (8C:1F:64:00:00:01, 8C:1F:64:00:00:02)
 0000000003 2024-06-14 13:34:11.958 [DMM] [Device Status] Flash Status OK, TYPE : EMMC FLASH, SIZE : 4G Bytes
 0000000004 2024-06-14 13:34:11.959 [DMM] [Device Status] Memory Status (PowerOn): Total 608200 KB, Free 432772 KB
 0000000006 2024-06-14 13:34:12.306 [DMM] [Device Status] Temperature (PowerOn) : tsens_tz_sensor0 (47C), tsens_tz_sensor1 (45C), tsens_tz_sensor5 (46C)
@@ -11,16 +11,16 @@
 0000001024 2024-06-03 00:42:15.246 [TR69] RPC Inform sent to ACS, event-list : 10 AUTONOMOUS TRANSFER COMPLETE M Upload 4 VALUE CHANGE
 0000001025 2024-06-03 00:42:15.451 [TR69] RPC InformResponse received from ACS
 0000001021 2024-06-03 00:42:14.317 [FM] Periodic VendorLog upload started, PeriodicUploadInterval=60s
-0000001022 2024-06-03 00:42:14.467 [FILE_TRANS] File upload success, curl code=(0), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240603.0042+0800_8C1F64.2205600282.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
+0000001022 2024-06-03 00:42:14.467 [FILE_TRANS] File upload success, curl code=(0), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240603.0042+0800_8C1F64.2205609999.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
 0000001027 2024-06-03 00:42:15.518 [TR69] RPC Unknown received from ACS
 0000000393 2024-06-03 00:11:24.434 [TR69] Alarm Report, id: 0x18020500 file: main/informer.c line: 307 detail: ACS Disconnect with error 1 (0:eOK, 1:eConnectError, 2:eGetError, 3:ePostError, 4:eAuthError)
 0000000395 2024-06-03 00:11:25.105 [TR69] Alarm Logged, id: 0x18020400 file: main/informer.c line: 175 detail: ACS connect failed, retryCount = 1, backOffTime = 7000ms
 0000000396 2024-06-03 00:11:25.112 [TR69] Alarm Report, id: 0x18020500 file: main/informer.c line: 1299 detail: ACS Connect Status = 2 Connection to host 192.168.8.100(192.168.8.100):7547 failed 113 (No route to host)
-0000000392 2024-06-03 00:11:23.258 [FILE_TRANS] File upload failure, curl code=(28), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240603.0011+0800_8C1F64.2205600282.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
-0000000394 2024-06-03 00:11:24.454 [FILE_TRANS] File upload failure, curl code=(7), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240603.0011+0800_8C1F64.2205600282.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
-0000000086 2024-06-02 23:14:15.506 [FILE_TRANS] File upload failure, curl code=(25), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240602.2311+0800_8C1F64.2205600282.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/uploads')
-0000000399 2024-06-03 00:11:30.535 [FM] Alarm Logged, id: 0x12020413 file: src/fm_common.c line: 8155 detail: Failed to upload device log to server(/tmp/Log_20240603.0011+0800_8C1F64.2205600282.gz).
-0000000134 2024-06-13 17:59:03.524 [FILE_TRANS] File upload failure, curl code=(7), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/ErrorLog_20240613.1758+0800_8C1F64.2205600282.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
+0000000392 2024-06-03 00:11:23.258 [FILE_TRANS] File upload failure, curl code=(28), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240603.0011+0800_8C1F64.2205609999.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
+0000000394 2024-06-03 00:11:24.454 [FILE_TRANS] File upload failure, curl code=(7), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240603.0011+0800_8C1F64.2205609999.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
+0000000086 2024-06-02 23:14:15.506 [FILE_TRANS] File upload failure, curl code=(25), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/Log_20240602.2311+0800_8C1F64.2205609999.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/uploads')
+0000000399 2024-06-03 00:11:30.535 [FM] Alarm Logged, id: 0x12020413 file: src/fm_common.c line: 8155 detail: Failed to upload device log to server(/tmp/Log_20240603.0011+0800_8C1F64.2205609999.gz).
+0000000134 2024-06-13 17:59:03.524 [FILE_TRANS] File upload failure, curl code=(7), command (/mnt/flash/cpe/apps/oam/bin/curl -vvv     -T /tmp/ErrorLog_20240613.1758+0800_8C1F64.2205609999.gz -C - -s   --connect-timeout 10 -f -u nybsys:REDACTED  -g 'ftp://192.168.8.100/')
 0000000082 2024-06-13 17:58:04.700 [SCTP] Alarm Report, id: 0x02120400 file: src/sctp_app.c line: 1588 detail: SCTP Connect Peer Failed!
 0000000083 2024-06-13 17:58:04.750 [SON] S1 setup failed, S1RefId = 0, Choice = 0, Cause = 0
 0000000116 2024-06-13 17:58:37.322 [SON] S1 setup failure reach S1RetryMaxNum

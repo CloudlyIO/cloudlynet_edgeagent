@@ -21,8 +21,8 @@ func TestCWMPUpsertAndListDevices(t *testing.T) {
 	b := openMem(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	b.UpsertDevice(cwmp.DeviceRecord{
-		DeviceID: "8C1F64-ENB%2DN03002%2DB3-2205600282", IP: "192.168.8.100",
-		Manufacturer: "NybSys", ProductClass: "ENB-N03002-B3", SerialNumber: "2205600282",
+		DeviceID: "8C1F64-ENB%2DN03002%2DB3-2205609999", IP: "192.168.8.100",
+		Manufacturer: "NybSys", ProductClass: "ENB-N03002-B3", SerialNumber: "2205609999",
 		SWVersion: "V1.7.1", LastInformAt: now,
 	})
 	devices := b.ListDevices()
@@ -30,17 +30,17 @@ func TestCWMPUpsertAndListDevices(t *testing.T) {
 		t.Fatalf("ListDevices len = %d, want 1", len(devices))
 	}
 	d := devices[0]
-	if d.DeviceID != "8C1F64-ENB%2DN03002%2DB3-2205600282" || d.IP != "192.168.8.100" || d.SWVersion != "V1.7.1" {
+	if d.DeviceID != "8C1F64-ENB%2DN03002%2DB3-2205609999" || d.IP != "192.168.8.100" || d.SWVersion != "V1.7.1" {
 		t.Errorf("device = %+v", d)
 	}
 	if !d.LastInformAt.Equal(now) {
 		t.Errorf("LastInformAt = %v, want %v", d.LastInformAt, now)
 	}
-	if got := b.DeviceIP("8C1F64-ENB%2DN03002%2DB3-2205600282"); got != "192.168.8.100" {
+	if got := b.DeviceIP("8C1F64-ENB%2DN03002%2DB3-2205609999"); got != "192.168.8.100" {
 		t.Errorf("DeviceIP = %q", got)
 	}
 	// Re-upsert must not create a duplicate row.
-	b.UpsertDevice(cwmp.DeviceRecord{DeviceID: "8C1F64-ENB%2DN03002%2DB3-2205600282", IP: "192.168.8.101"})
+	b.UpsertDevice(cwmp.DeviceRecord{DeviceID: "8C1F64-ENB%2DN03002%2DB3-2205609999", IP: "192.168.8.101"})
 	if devices := b.ListDevices(); len(devices) != 1 || devices[0].IP != "192.168.8.101" {
 		t.Errorf("re-upsert devices = %+v", devices)
 	}

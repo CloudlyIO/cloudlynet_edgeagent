@@ -13,7 +13,7 @@ func TestLoadManifest(t *testing.T) {
 	if len(m.Params) != m.Count {
 		t.Errorf("params len = %d, want %d", len(m.Params), m.Count)
 	}
-	if m.CanonicalID != "8C1F64-ENB%2DN03002%2DB3-2205600282" {
+	if m.CanonicalID != "8C1F64-ENB%2DN03002%2DB3-2205609999" {
 		t.Errorf("canonical id = %q", m.CanonicalID)
 	}
 }

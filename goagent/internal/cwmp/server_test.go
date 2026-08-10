@@ -60,10 +60,10 @@ func TestServerSessionReplayNoFault(t *testing.T) {
 		t.Fatalf("session end status = %d, want 204", status)
 	}
 
-	if _, ok := store.devices["8C1F64-ENB%2DN03002%2DB3-2205600282"]; !ok {
+	if _, ok := store.devices["8C1F64-ENB%2DN03002%2DB3-2205609999"]; !ok {
 		t.Error("device not registered from Inform")
 	}
-	if !store.writability["8C1F64-ENB%2DN03002%2DB3-2205600282"] {
+	if !store.writability["8C1F64-ENB%2DN03002%2DB3-2205609999"] {
 		t.Error("writability map not saved from the GPN walk")
 	}
 }
@@ -73,7 +73,7 @@ func TestServerSessionReplayNoFault(t *testing.T) {
 func TestServerEnqueueAwait(t *testing.T) {
 	store := newFakeStore()
 	// Preload writability so Inform does not enqueue a first-contact GPN.
-	store.writability["8C1F64-ENB%2DN03002%2DB3-2205600282"] = true
+	store.writability["8C1F64-ENB%2DN03002%2DB3-2205609999"] = true
 	srv := NewServer("0.0.0.0:7547", store)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()

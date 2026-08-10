@@ -251,7 +251,7 @@ device pushes (not the reboot-only `continuouslogging.tgz` dump, whose agent int
   failures / ACS / reboot / SCTP·SON faults) **verbatim** — the same lines also land in that cycle's
   `Log`, so the cloud's content-dedup collapses the overlap (correlated, like a real device).
 
-Content is a small **redacted real sample** (`fixtures/real_sample.log`) plus **synthetic per-module
+Content is a small **redacted, anonymized real sample** (`fixtures/real_sample.log`) plus **synthetic per-module
 filler** and the scenario's signature line (staged in every `Log`). Fidelity scope: `Log_*.gz` +
 `ErrorLog_*.gz` only; operational lines jittered / incident lines sticky (a fixed corpus — message text
 repeats, seq·ts·filename advance); cycle-based incident windows; single device. Real FTP credentials
