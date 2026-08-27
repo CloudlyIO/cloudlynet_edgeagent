@@ -157,13 +157,15 @@ func (c *Collector) CollectTier(ctx context.Context, tier int) ([]cloud.MetricSa
 
 // Snapshot reads the managed configuration catalogue for a device, preferring a
 // fresh device read and falling back to the last cached values. The worker skips
-// publishing an all-empty result.
+// publishing an all-empty result. The read is routed by cwmp_id (per-device
+// session), never by IP — several devices can share one source IP and the
+// answering device must be the one the snapshot is published under.
 func (c *Collector) Snapshot(ctx context.Context, cwmpID string) (map[string]any, error) {
-	ip := c.acs.Store().DeviceIP(cwmpID)
-	if ip == "" {
+	if c.acs.Store().DeviceIP(cwmpID) == "" {
+		// Never onboarded — nothing to read.
 		return map[string]any{}, nil
 	}
-	res, ok := c.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskGPV, Paths: SnapshotPaths, CommandID: "snapshot:" + cwmpID}, snapshotAwait)
+	res, ok := c.acs.RequestAndAwait(cwmpID, cwmp.Task{Type: cwmp.TaskGPV, Paths: SnapshotPaths, CommandID: "snapshot:" + cwmpID}, snapshotAwait)
 	if ok && len(res.Params) > 0 {
 		return ToAnyMap(res.Params), nil
 	}
