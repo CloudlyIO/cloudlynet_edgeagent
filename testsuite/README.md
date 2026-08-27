@@ -217,6 +217,13 @@ Optional file `conf/nanolink.conf` (all fields default; env vars win over the fi
 | `ftp.pass`               | _(empty)_       | `FTP_PASS`               |
 | `ftp.upload_interval`    | `60s`           | —                        |
 | `scenario`               | `happy`         | `NANOLINK_SCENARIO`      |
+| `devices`                | _(unset)_       | — (conf-file-only)       |
+
+An optional `devices:` list switches the process into **fleet mode** — N mock femtocells in one
+process, each with its own identity, param overlay (PCI/CellIdentity/EARFCN/RS-power/...), CWMP +
+FTP loops, and connection-request port (`30005+index`). With no `devices:` list, behavior is the
+historical single device, byte-for-byte. Schema, per-device health gate, and a worked example:
+[FLEET.md](FLEET.md).
 
 > **Why the serial is synthetic.** `cwmp_id = OUI-ProductClass-Serial` is UNIQUE per tenant on the
 > real cloud, so reusing a *real* device's serial makes an `acsftp` run collide with that device's

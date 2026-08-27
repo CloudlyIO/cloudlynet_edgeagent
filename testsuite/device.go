@@ -2,8 +2,9 @@
 // loop (Inform -> GetRPCMethods -> TransferComplete -> [ATC when a transfer
 // completed] -> drain the queued GPV/SPV/GPN/Reboot), answering each ACS task
 // from its manifest-seeded param store. The SOAP envelopes it sends/returns live
-// in soap.go. Device identity is config-driven and shared package-wide (set once
-// in main()).
+// in soap.go. Device identity is config-driven and PER-DEVICE (a deviceSpec
+// resolved in config.go): one process runs one device by default, or a whole
+// fleet when the conf carries a devices: list (see FLEET.md).
 package main
 
 import (
@@ -12,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,14 +21,22 @@ import (
 	"time"
 )
 
-// Device identity is config-driven (nanolinkConfig.Identity) — these vars are
-// set once in main() before any goroutine starts, then read everywhere the
-// old hardcoded consts used to be.
-var (
-	deviceOUI          string
-	deviceProductClass string
-	deviceSerial       string
-	deviceCWMPID       string // canonical (%2D-encoded) id, derived from identity
+// connectionRequestURLPath is the TR-069 path a real CPE advertises its CR
+// listener under. Fleet mode overlays it per device; single-device mode leaves
+// the manifest's captured value untouched (back-compat).
+const connectionRequestURLPath = "Device.ManagementServer.ConnectionRequestURL"
+
+// Configured-vs-in-use RF identity pairs: a real device reports the PCI/EARFCN
+// it is actually radiating under the X_8C1F64_*InUse paths (the agent's T2
+// pci_inuse/earfcn_dl_inuse metrics read those). When a fleet overlay sets the
+// configured value but not the in-use one, the mock mirrors it so each device's
+// telemetry carries its own PCI — which is also what lets the mock cloud verify
+// metric-sample attribution (see cloud.go).
+const (
+	phyCellIDConfigPath = "Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.PhyCellID"
+	phyCellIDInUsePath  = "Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.X_8C1F64_PhyCellIDInUse"
+	earfcnDLConfigPath  = "Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.EARFCNDL"
+	earfcnDLInUsePath   = "Device.Services.FAPService.1.CellConfig.LTE.RAN.RF.X_8C1F64_EARFCNDLInUse"
 )
 
 type device struct {
@@ -35,6 +45,17 @@ type device struct {
 	informsSent int64
 	pendingXfer int64
 	lastXfer    atomic.Value // most recent xfer, announced by the next ATC
+
+	// Identity — formerly the package-level deviceOUI/deviceProductClass/
+	// deviceSerial/deviceCWMPID globals, now per-device so N devices can run in
+	// one process. Set once at construction, read-only afterwards.
+	oui          string
+	productClass string
+	serial       string
+	cwmpID       string // canonical (%2D-encoded) id, derived from identity
+	index        int    // fleet position (0 in single-device mode)
+	crPort       int    // connection-request listener port (30005 + index)
+	crURL        string // advertised CR URL; empty = single-device back-compat
 }
 
 // xfer is the file a completed autonomous transfer announces over ATC.
@@ -43,18 +64,27 @@ type xfer struct {
 	size int
 }
 
-// newDevice seeds the mock device's entire param store from the NanoLink
+// newDevice builds a single mock device with the built-in default identity —
+// the shape main() historically ran and what the unit tests construct.
+func newDevice(m *manifest) *device {
+	specs, _ := defaultNanolinkConfig().deviceSpecs() // no devices: list -> never errors
+	return newDeviceFromSpec(m, specs[0])
+}
+
+// newDeviceFromSpec seeds the mock device's entire param store from the NanoLink
 // manifest (20,260 params), so a GetParameterValues for any managed path
 // returns a realistic value + xsi:type (see manifest.go's xsdType). Only
 // fields the manifest doesn't carry (test-harness IPs) are overridden; identity
-// stays in lockstep with the active config (deviceOUI/ProductClass/Serial),
-// never the manifest's own snapshot values.
-func newDevice(m *manifest) *device {
+// stays in lockstep with the spec (oui/product_class/serial), never the
+// manifest's own snapshot values. The spec's params overlay is applied LAST —
+// after identity seeding and the T3 PM pins — so a fleet conf can give each
+// device its own PhyCellID/CellIdentity/EARFCNDL/RS-power/SampleSet values.
+func newDeviceFromSpec(m *manifest, spec deviceSpec) *device {
 	params := m.seedParams()
 	params["Device.LAN.IPAddress"] = "192.168.8.248"
 	params["Device.WAN.IPAddress"] = "10.0.0.10"
-	params["Device.DeviceInfo.SerialNumber"] = deviceSerial
-	params["Device.DeviceInfo.ProductClass"] = deviceProductClass
+	params["Device.DeviceInfo.SerialNumber"] = spec.Serial
+	params["Device.DeviceInfo.ProductClass"] = spec.ProductClass
 
 	// PM counters the agent's T3 collector reads (goagent/internal/collector/metrics.go
 	// tier3Metrics), pinned over whatever the manifest snapshot carries. Without known
@@ -82,7 +112,41 @@ func newDevice(m *manifest) *device {
 	} {
 		params[k] = v
 	}
-	return &device{params: params}
+	// Fleet mode: the device advertises its own connection-request listener
+	// (30005+index). Single-device mode passes CRURL="" and the manifest's
+	// captured value stays byte-identical to the historical store.
+	if spec.CRURL != "" {
+		params[connectionRequestURLPath] = spec.CRURL
+	}
+	// Per-device overlay last: it may override anything above, including the T3
+	// PM pins (e.g. a per-cell SampleSet CurrentValue) — that is the point.
+	for k, v := range spec.Params {
+		params[k] = v
+	}
+	// Mirror overlaid configured RF identity into the *InUse reporting paths
+	// (unless the overlay pinned those explicitly): a real device radiates the
+	// PCI/EARFCN it is configured with, and the agent's T2 telemetry reads the
+	// in-use paths. Overlay-gated, so the single-device store stays byte-identical.
+	for cfgPath, inUsePath := range map[string]string{
+		phyCellIDConfigPath: phyCellIDInUsePath,
+		earfcnDLConfigPath:  earfcnDLInUsePath,
+	} {
+		if v, overlaid := spec.Params[cfgPath]; overlaid {
+			if _, pinned := spec.Params[inUsePath]; !pinned {
+				params[inUsePath] = v
+			}
+		}
+	}
+	return &device{
+		params:       params,
+		oui:          spec.OUI,
+		productClass: spec.ProductClass,
+		serial:       spec.Serial,
+		cwmpID:       spec.CWMPID,
+		index:        spec.Index,
+		crPort:       spec.CRPort,
+		crURL:        spec.CRURL,
+	}
 }
 
 // deviceParamsHandler serves /device/params - test and demo fault injection plus read-back.
@@ -132,6 +196,40 @@ func deviceParamsHandler(dev *device) http.HandlerFunc {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+// deviceParamsMux routes /device/params to a device. Single device: exactly the
+// historical deviceParamsHandler (no selector, byte-identical behavior). Fleet:
+// the ?device=<serial|cwmp_id> selector is REQUIRED — with N devices there is
+// no safe default, and a demo script that forgot the selector would silently
+// degrade the wrong femtocell with a 200 OK.
+func deviceParamsMux(devices []*device) http.HandlerFunc {
+	if len(devices) == 1 {
+		return deviceParamsHandler(devices[0])
+	}
+	serials := make([]string, len(devices))
+	for i, d := range devices {
+		serials[i] = d.serial
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		sel := r.URL.Query().Get("device")
+		if sel == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":      false,
+				"error":   "fleet mode: the ?device=<serial|cwmp_id> selector is required",
+				"devices": serials,
+			})
+			return
+		}
+		for _, d := range devices {
+			if d.serial == sel || d.cwmpID == sel {
+				deviceParamsHandler(d)(w, r)
+				return
+			}
+		}
+		writeJSON(w, http.StatusNotFound,
+			map[string]any{"ok": false, "error": "unknown device " + sel})
 	}
 }
 
@@ -201,7 +299,15 @@ func runConnRequestListener(addr string, dialNow chan<- struct{}) {
 }
 
 func runDeviceLoop(agentURL string, dev *device, dialNow <-chan struct{}, m *manifest) {
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Per-device cookie jar: TR-069 requires the CPE to return the ACS's cookies
+	// within a session, and the agent's ACS keys mid-session routing on its
+	// CWMPSID cookie. With N devices sharing this process's ONE source IP, the
+	// jar is what keeps each device's GPV/SPV traffic attributed to itself.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		log.Printf("cookie jar init failed (device %s): %v", dev.serial, err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Jar: jar}
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {

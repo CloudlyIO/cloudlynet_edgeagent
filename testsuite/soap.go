@@ -29,6 +29,12 @@ func informEnvelope(msgID string, dev *device) string {
 		"Device.Services.FAPService.1.FAPControl.LTE.RFTxStatus",
 		"Device.Services.FAPService.1.FAPControl.LTE.OpState",
 	}
+	// Fleet mode: each device advertises its own connection-request URL
+	// (30005+index) in the Inform, like a real CPE. Single-device mode keeps
+	// the historical parameter list byte-for-byte (crURL is empty).
+	if dev.crURL != "" {
+		informParams = append(informParams, connectionRequestURLPath)
+	}
 	pairs := dev.get(informParams)
 	var pl strings.Builder
 	for _, pv := range pairs {
@@ -40,7 +46,7 @@ func informEnvelope(msgID string, dev *device) string {
 		`<MaxEnvelopes>1</MaxEnvelopes><CurrentTime>%s</CurrentTime><RetryCount>0</RetryCount>`+
 		`<ParameterList soap:arrayType="cwmp:ParameterValueStruct[%d]">%s</ParameterList>`+
 		`</cwmp:Inform>`,
-		deviceOUI, deviceProductClass, deviceSerial, time.Now().UTC().Format(time.RFC3339), len(pairs), pl.String())
+		dev.oui, dev.productClass, dev.serial, time.Now().UTC().Format(time.RFC3339), len(pairs), pl.String())
 	return wrap(msgID, inner)
 }
 
