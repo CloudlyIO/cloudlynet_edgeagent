@@ -29,6 +29,10 @@ type Session struct {
 	store     Store
 	taskQueue chan Task
 	results   chan TaskResult
+	// waiters routes a result to the caller awaiting that specific CommandID, so
+	// two concurrent Awaits on one session cannot consume each other's results.
+	wmu     sync.Mutex
+	waiters map[string]chan TaskResult
 	inflight  *Task
 	// firstContactGPV, if set, is read once on first contact (alongside the
 	// writability walk) to populate the managed-config cache immediately.
@@ -170,14 +174,55 @@ func (s *Session) finishInflight(res TaskResult) interface{} {
 	if s.inflight != nil {
 		if s.inflight.CommandID != "" {
 			res.CommandID = s.inflight.CommandID
-			select {
-			case s.results <- res:
-			default:
-			}
+			s.deliver(res)
 		}
 		s.inflight = nil
 	}
 	return s.nextTask()
+}
+
+// deliver hands a result to the goroutine waiting for THAT command, falling back
+// to the shared channel when nobody registered for it.
+//
+// One device session serves several concurrent callers — the worker applying a
+// command and the collector taking a config snapshot both Await on it. When every
+// result went to one shared channel, whichever Await happened to receive a result
+// it did not recognise DISCARDED it, and the rightful waiter timed out: an applied
+// write was reported as "device session timeout" and rolled back. Routing by
+// CommandID makes concurrent waiters independent.
+func (s *Session) deliver(res TaskResult) {
+	s.wmu.Lock()
+	ch, ok := s.waiters[res.CommandID]
+	s.wmu.Unlock()
+	if ok {
+		select {
+		case ch <- res:
+			return
+		default:
+		}
+	}
+	select {
+	case s.results <- res:
+	default:
+	}
+}
+
+// waitFor registers a private channel for one CommandID. The returned release
+// func must be called by the waiter; a result arriving after release falls back
+// to the shared channel rather than blocking the session goroutine.
+func (s *Session) waitFor(commandID string) (<-chan TaskResult, func()) {
+	ch := make(chan TaskResult, 1)
+	s.wmu.Lock()
+	if s.waiters == nil {
+		s.waiters = map[string]chan TaskResult{}
+	}
+	s.waiters[commandID] = ch
+	s.wmu.Unlock()
+	return ch, func() {
+		s.wmu.Lock()
+		delete(s.waiters, commandID)
+		s.wmu.Unlock()
+	}
 }
 
 // nextTask pops one queued task and returns the ACS→CPE request for it, or nil

@@ -230,3 +230,48 @@ func TestServerCRUsesAdvertisedURL(t *testing.T) {
 		t.Fatalf("crURL = %q, want the configured override to win", got)
 	}
 }
+
+// A device session serves several callers at once: the worker applying a command and the
+// collector taking a config snapshot both Await on it. Before results were routed by
+// CommandID, whichever Await received a result it did not recognise discarded it, and the
+// rightful waiter timed out — an applied write was reported as "device session timeout" and
+// then rolled back. This is that race, pinned.
+func TestConcurrentAwaitsDoNotConsumeEachOthersResults(t *testing.T) {
+	srv := NewServer("0.0.0.0:7547", newFakeStore())
+	const dev = "8C1F64-ENB%2DN03002%2DB3-2205610013"
+
+	type outcome struct {
+		res TaskResult
+		ok  bool
+	}
+	// Repeated: with the old shared-channel drain, which waiter consumed (and threw away) the
+	// other's result was a coin flip, so one round reproduced the loss only half the time.
+	for round := 0; round < 6; round++ {
+		spv := make(chan outcome, 1)
+		snap := make(chan outcome, 1)
+
+		go func() {
+			r, ok := srv.Await(dev, "cmd-1", 3*time.Second)
+			spv <- outcome{r, ok}
+		}()
+		go func() {
+			r, ok := srv.Await(dev, "snapshot:"+dev, 3*time.Second)
+			snap <- outcome{r, ok}
+		}()
+		time.Sleep(50 * time.Millisecond) // let both register
+
+		sess := srv.session(dev)
+		// Deliver in the opposite order to the waits, which is what made the old code drop one.
+		sess.deliver(TaskResult{CommandID: "snapshot:" + dev, Params: map[string]string{"p": "1"}})
+		sess.deliver(TaskResult{CommandID: "cmd-1", Params: map[string]string{"p": "2"}})
+
+		got := <-spv
+		if !got.ok || got.res.CommandID != "cmd-1" || got.res.Params["p"] != "2" {
+			t.Fatalf("round %d: the command waiter lost its result: %+v", round, got)
+		}
+		gotSnap := <-snap
+		if !gotSnap.ok || gotSnap.res.CommandID != "snapshot:"+dev {
+			t.Fatalf("round %d: the snapshot waiter lost its result: %+v", round, gotSnap)
+		}
+	}
+}

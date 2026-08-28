@@ -240,12 +240,30 @@ func (srv *Server) Enqueue(deviceID string, t Task) { srv.session(deviceID).enqu
 func (srv *Server) Await(deviceID, commandID string, timeout time.Duration) (TaskResult, bool) {
 	sess := srv.session(deviceID)
 	deadline := time.After(timeout)
-	for {
+	if commandID == "" {
+		// Anonymous wait: take whatever the session publishes next.
 		select {
 		case res := <-sess.results:
-			if commandID == "" || res.CommandID == commandID {
+			return res, true
+		case <-deadline:
+			return TaskResult{}, false
+		}
+	}
+	// Register before returning to the caller so a fast device cannot answer
+	// between Enqueue and the wait.
+	mine, release := sess.waitFor(commandID)
+	defer release()
+	for {
+		select {
+		case res := <-mine:
+			return res, true
+		case res := <-sess.results:
+			// Pre-registration or fallback delivery; anything else belongs to
+			// another waiter and must be put back, never dropped.
+			if res.CommandID == commandID {
 				return res, true
 			}
+			sess.deliver(res)
 		case <-deadline:
 			return TaskResult{}, false
 		}
