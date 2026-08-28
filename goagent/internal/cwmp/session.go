@@ -31,9 +31,9 @@ type Session struct {
 	results   chan TaskResult
 	// waiters routes a result to the caller awaiting that specific CommandID, so
 	// two concurrent Awaits on one session cannot consume each other's results.
-	wmu     sync.Mutex
-	waiters map[string]chan TaskResult
-	inflight  *Task
+	wmu      sync.Mutex
+	waiters  map[string]chan TaskResult
+	inflight *Task
 	// firstContactGPV, if set, is read once on first contact (alongside the
 	// writability walk) to populate the managed-config cache immediately.
 	firstContactGPV []string
@@ -46,6 +46,12 @@ func (s *Session) Handle(env *Envelope) interface{} {
 	b := env.Body
 	switch {
 	case b.Inform != nil:
+		// A new Inform means the previous session ended. Anything we had handed the device
+		// and never got an answer for is orphaned: the caller can only time out, and an
+		// operator sees "device session timeout" for a write the device may never have seen.
+		// Re-queue it so the retry rides this session. Reboot is deliberately excluded: an
+		// unanswered reboot may well have happened, and re-sending it is not idempotent.
+		s.requeueOrphanedTask()
 		return s.onInform(b.Inform)
 	case b.GetRPCMethods != nil:
 		return s.onGetRPCMethods()
@@ -222,6 +228,23 @@ func (s *Session) waitFor(commandID string) (<-chan TaskResult, func()) {
 		s.wmu.Lock()
 		delete(s.waiters, commandID)
 		s.wmu.Unlock()
+	}
+}
+
+// requeueOrphanedTask puts an unanswered in-flight task back on the queue when a session
+// ends without a response. Bounded by the queue's own capacity: a device that never answers
+// drops the task on the next full queue rather than looping forever.
+func (s *Session) requeueOrphanedTask() {
+	t := s.inflight
+	s.inflight = nil
+	if t == nil || t.CommandID == "" || t.Type == TaskReboot {
+		return
+	}
+	select {
+	case s.taskQueue <- *t:
+		log.Printf("[CWMP][%s] re-queued unanswered %s task key=%s", s.DeviceID, t.Type, t.CmdKey)
+	default:
+		log.Printf("[CWMP][%s] task queue full; dropping unanswered %s task", s.DeviceID, t.Type)
 	}
 }
 

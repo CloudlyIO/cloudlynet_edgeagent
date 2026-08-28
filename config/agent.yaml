@@ -6,7 +6,11 @@ telemetry_t2_interval: 15s
 telemetry_t3_interval: 30s
 snapshot_interval: 10s
 command_verify_delay: 500ms
-command_verify_timeout: 3s
+# 15s, matching deploy/agent.yaml and the code default. The rest of this file is deliberately
+# accelerated for CI, but a 3s verify budget was sized for ONE device: with a fleet behind one
+# agent the SPV reaches the device and its answer misses the window, so an applied write is
+# reported as "device session timeout" and rolled back (~40% of applies with 14 devices).
+command_verify_timeout: 15s
 cwmp:
   listen: "0.0.0.0:7547"
   full_snapshot_on_first_contact: true

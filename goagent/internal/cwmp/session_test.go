@@ -239,3 +239,52 @@ func TestFormatWritesRedactsSecrets(t *testing.T) {
 		t.Errorf("non-secret value must stay readable for the TR-069 trace: %q", got)
 	}
 }
+
+// A task handed to the device and never answered (the session ended first) used to sit in
+// `inflight` forever: the caller could only time out, and an operator saw "device session
+// timeout" for a write the device may never have processed. The next Inform re-queues it.
+func TestAnUnansweredTaskIsRequeuedOnTheNextInform(t *testing.T) {
+	s := newTestSession(newFakeStore())
+	s.enqueue(Task{Type: TaskSPV, CommandID: "cmd-1", CmdKey: "cmd-1",
+		Writes: []ParameterValueStruct{{Name: "P", Value: ValueNode{Text: "1"}}}})
+
+	if req := s.nextTask(); req == nil {
+		t.Fatal("expected the SPV to be handed to the device")
+	}
+	if s.inflight == nil {
+		t.Fatal("expected the task to be in flight")
+	}
+
+	// The device never answers; it re-dials instead.
+	s.Handle(&Envelope{Body: Body{Inform: &Inform{}}})
+
+	if s.inflight != nil {
+		t.Fatal("the orphaned task should have been cleared from inflight")
+	}
+	if req := s.nextTask(); req == nil {
+		t.Fatal("the unanswered SPV should have been re-queued for the new session")
+	}
+	if s.inflight == nil || s.inflight.CommandID != "cmd-1" {
+		t.Fatalf("expected cmd-1 back in flight, got %+v", s.inflight)
+	}
+}
+
+// A reboot is not idempotent: an unanswered one may well have happened, so it must not be
+// re-sent automatically.
+func TestAnUnansweredRebootIsNotRequeued(t *testing.T) {
+	s := newTestSession(newFakeStore())
+	s.enqueue(Task{Type: TaskReboot, CommandID: "cmd-2", CmdKey: "cmd-2"})
+	s.nextTask()
+	s.Handle(&Envelope{Body: Body{Inform: &Inform{}}})
+	// The Inform itself may enqueue first-contact work (a GPN walk); what must never come
+	// back is the reboot.
+	for i := 0; i < 4; i++ {
+		req := s.nextTask()
+		if req == nil {
+			return
+		}
+		if _, isReboot := req.(*Reboot); isReboot {
+			t.Fatal("a reboot must not be re-queued after an unanswered session")
+		}
+	}
+}
