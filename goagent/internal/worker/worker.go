@@ -217,14 +217,17 @@ func (w *Worker) handleCommands(ctx context.Context) {
 }
 
 func (w *Worker) apply(ctx context.Context, cmd cloud.Command) cloud.AckRequest {
-	ip := w.acs.Store().DeviceIP(cmd.CWMPID)
-	if ip == "" {
+	// DeviceIP is populated by the device's Inform — its absence means the device
+	// never onboarded. Task routing itself is by canonical cwmp_id (NOT by IP:
+	// several devices can share one source IP, and an IP-routed SPV could be
+	// executed by the wrong femtocell).
+	if w.acs.Store().DeviceIP(cmd.CWMPID) == "" {
 		return failed(fmt.Errorf("no CWMP session for device %s", cmd.CWMPID))
 	}
 	switch cmd.Type {
 	case "configure", "optimise", "heal", "rollback":
 		writes := toWrites(cmd.Payload.Writes, w.manifest)
-		res, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskSPV, Writes: writes, CmdKey: cmd.ID, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout)
+		res, ok := w.acs.RequestAndAwait(cmd.CWMPID, cwmp.Task{Type: cwmp.TaskSPV, Writes: writes, CmdKey: cmd.ID, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout)
 		if !ok {
 			return failed(fmt.Errorf("device session timeout applying %s", cmd.ID))
 		}
@@ -243,7 +246,7 @@ func (w *Worker) apply(ctx context.Context, cmd cloud.Command) cloud.AckRequest 
 		case <-time.After(w.cfg.CommandVerifyDelay):
 		}
 		expected := expectedValues(cmd.Payload)
-		rb, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskGPV, Paths: keysOf(expected), CommandID: cmd.ID + ":rb"}, w.cfg.CommandVerifyTimeout)
+		rb, ok := w.acs.RequestAndAwait(cmd.CWMPID, cwmp.Task{Type: cwmp.TaskGPV, Paths: keysOf(expected), CommandID: cmd.ID + ":rb"}, w.cfg.CommandVerifyTimeout)
 		if !ok {
 			return failed(fmt.Errorf("read-back timeout for %s", cmd.ID))
 		}
@@ -257,13 +260,13 @@ func (w *Worker) apply(ctx context.Context, cmd cloud.Command) cloud.AckRequest 
 		}
 		return cloud.AckRequest{Status: status, Result: cloud.AckResult{Readback: readback, Mismatch: mismatch, TaskID: cmd.ID, Detail: detail}}
 	case "query":
-		res, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskGPV, Paths: cmd.Payload.ReadPaths, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout)
+		res, ok := w.acs.RequestAndAwait(cmd.CWMPID, cwmp.Task{Type: cwmp.TaskGPV, Paths: cmd.Payload.ReadPaths, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout)
 		if !ok {
 			return failed(fmt.Errorf("query timeout for %s", cmd.ID))
 		}
 		return cloud.AckRequest{Status: "applied", Result: cloud.AckResult{Readback: collector.ToAnyMap(res.Params)}}
 	case "reboot":
-		if _, ok := w.acs.RequestAndAwait(ip, cwmp.Task{Type: cwmp.TaskReboot, CmdKey: cmd.ID, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout); !ok {
+		if _, ok := w.acs.RequestAndAwait(cmd.CWMPID, cwmp.Task{Type: cwmp.TaskReboot, CmdKey: cmd.ID, CommandID: cmd.ID}, w.cfg.CommandVerifyTimeout); !ok {
 			return failed(fmt.Errorf("no reboot ack for %s", cmd.ID))
 		}
 		return cloud.AckRequest{Status: "applied"}

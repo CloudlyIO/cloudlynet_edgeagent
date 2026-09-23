@@ -55,8 +55,11 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 	corpus := sampleLines()
 	cycle := 0
 	upload := func() {
+		// Identity comes from the OWNING device (per-device in fleet mode), so
+		// loggen.rewriteIdentity stamps each device's own OUI/serial/product-class
+		// into its generated log content and filenames.
 		genCfg := loggen.Config{
-			OUI: deviceOUI, Serial: deviceSerial, ProductClass: deviceProductClass,
+			OUI: dev.oui, Serial: dev.serial, ProductClass: dev.productClass,
 			At: time.Now().UTC(), Scenario: cfg.scenario, Cycle: cycle,
 		}
 		logGz, errorLogGz, err := loggen.Generate(genCfg, corpus)

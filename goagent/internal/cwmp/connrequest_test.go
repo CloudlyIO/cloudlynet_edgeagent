@@ -19,7 +19,7 @@ func TestTriggerConnectionRequestDigestHandshake(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if err := TriggerConnectionRequest("192.168.8.248", "8C1F64-ENB%2DN03002%2DB3-2205609999", "secret", ts.URL); err != nil {
+	if err := TriggerConnectionRequest(ts.URL, "8C1F64-ENB%2DN03002%2DB3-2205609999", "secret"); err != nil {
 		t.Fatalf("digest CR failed: %v", err)
 	}
 	if !sawAuth {
@@ -32,7 +32,7 @@ func TestTriggerConnectionRequestImmediate200(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
-	if err := TriggerConnectionRequest("192.168.8.248", "u", "p", ts.URL); err != nil {
+	if err := TriggerConnectionRequest(ts.URL, "u", "p"); err != nil {
 		t.Errorf("200 CR should succeed: %v", err)
 	}
 }
@@ -43,7 +43,7 @@ func TestTriggerConnectionRequestUnreachable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	closedURL := ts.URL
 	ts.Close()
-	if err := TriggerConnectionRequest("127.0.0.1", "u", "p", closedURL); err == nil {
+	if err := TriggerConnectionRequest(closedURL, "u", "p"); err == nil {
 		t.Error("expected an error for an unreachable CR endpoint")
 	}
 }
