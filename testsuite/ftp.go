@@ -41,7 +41,31 @@ type ftpUploadConfig struct {
 	pass     string
 	interval time.Duration
 	scenario loggen.Scenario
+	// retention is how long the device keeps its own uploads on the FTP server
+	// before deleting them (<= 0 keeps everything). See pruneOwnUploads.
+	retention time.Duration
 }
+
+// defaultFTPRetention bounds how long a mock device leaves its own uploads on
+// the FTP server. A real NanoLink's FTP target is rotated by its operator; the
+// mock has no operator, and an unpruned watch dir grew to ~354k files in ~78
+// days, which every agent restart then had to list (and, before the agent
+// persisted its ingest progress, re-parse). Six hours is far longer than the
+// agent needs (it ingests within one 2s poll) and keeps a day's debugging
+// window per device at 60s cadence small (~360 Log files).
+const defaultFTPRetention = 6 * time.Hour
+
+// pruneEveryCycles spaces retention sweeps: one NLST per device per sweep is
+// cheap, but there is no need to list the directory every 60s upload. The
+// first cycle always sweeps, so leftovers from before a restart go promptly.
+const pruneEveryCycles = 10
+
+// deleteBatch bounds the DELE commands passed to one curl invocation, keeping
+// argv small when a long-unpruned directory holds thousands of expired files.
+const deleteBatch = 200
+
+// uploadStampLayout is loggen's filename timestamp ("<date>.<time><tz>").
+const uploadStampLayout = "20060102.1504-0700"
 
 // runFTPUploadLoop waits for the device to Inform at least once (the agent's
 // device-id resolution depends on cwmp_devices being populated first), then
@@ -110,6 +134,9 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 				log.Printf("ftp-auth-fail probe (expected failure, proves curl(67)): %v", err)
 			}
 		}
+		if cfg.retention > 0 && cycle%pruneEveryCycles == 0 {
+			pruneOwnUploads(dev, cfg, time.Now())
+		}
 		cycle++
 	}
 	upload()
@@ -118,6 +145,109 @@ func runFTPUploadLoop(dev *device, cfg ftpUploadConfig) {
 	for range ticker.C {
 		upload()
 	}
+}
+
+// pruneOwnUploads deletes this device's uploads older than cfg.retention from
+// the FTP server, over FTP (NLST, then DELE) so the retention path goes
+// through the same curl -> vsftpd hop as the uploads. Each device prunes only
+// files carrying its own OUI.serial, so fleet devices never delete each
+// other's uploads. Failures are logged and retried on the next sweep.
+func pruneOwnUploads(dev *device, cfg ftpUploadConfig, now time.Time) {
+	names, err := curlList(cfg.host, cfg.user, cfg.pass)
+	if err != nil {
+		log.Printf("ftp retention list failed (device %s): %v", dev.serial, err)
+		return
+	}
+	expired := expiredUploads(names, dev.oui, dev.serial, now, cfg.retention)
+	if len(expired) == 0 {
+		return
+	}
+	if err := curlDelete(cfg.host, cfg.user, cfg.pass, expired); err != nil {
+		log.Printf("ftp retention delete failed (device %s): %v", dev.serial, err)
+		return
+	}
+	log.Printf("ftp retention: deleted %d upload(s) older than %s (device %s)", len(expired), cfg.retention, dev.serial)
+}
+
+// uploadTime parses the timestamp out of one of this device's own upload
+// names ("Log_|ErrorLog_<date>.<time><tz>_<OUI>.<serial>.gz"). ok is false for
+// any other name, including another device's uploads and anything whose stamp
+// does not parse; such files are never this device's to delete.
+func uploadTime(name, oui, serial string) (time.Time, bool) {
+	var rest string
+	switch {
+	case strings.HasPrefix(name, "Log_"):
+		rest = strings.TrimPrefix(name, "Log_")
+	case strings.HasPrefix(name, "ErrorLog_"):
+		rest = strings.TrimPrefix(name, "ErrorLog_")
+	default:
+		return time.Time{}, false
+	}
+	tail := "_" + oui + "." + serial + ".gz"
+	if !strings.HasSuffix(rest, tail) {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(uploadStampLayout, strings.TrimSuffix(rest, tail))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
+// expiredUploads selects this device's uploads stamped before now-keep. A
+// keep <= 0 selects nothing (keep everything).
+func expiredUploads(names []string, oui, serial string, now time.Time, keep time.Duration) []string {
+	if keep <= 0 {
+		return nil
+	}
+	cutoff := now.Add(-keep)
+	var out []string
+	for _, n := range names {
+		if ts, ok := uploadTime(n, oui, serial); ok && ts.Before(cutoff) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// curlList returns the FTP root's entry names (curl --list-only == NLST).
+func curlList(host, user, pass string) ([]string, error) {
+	url := fmt.Sprintf("ftp://%s/", host)
+	cmd := exec.Command("curl", "-sS", "--list-only", "-u", user+":"+pass, "--connect-timeout", "5", url)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var names []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			names = append(names, l)
+		}
+	}
+	return names, nil
+}
+
+// curlDelete removes names from the FTP root with DELE quote commands. -I
+// (no body) keeps curl from opening a data connection or listing the
+// directory after the quotes; the "*" prefix lets the remaining DELEs run
+// when one fails (e.g. a file already gone), so one stale name cannot block
+// a whole batch.
+func curlDelete(host, user, pass string, names []string) error {
+	url := fmt.Sprintf("ftp://%s/", host)
+	for start := 0; start < len(names); start += deleteBatch {
+		end := min(start+deleteBatch, len(names))
+		args := []string{"-sS", "-I", "-u", user + ":" + pass, "--connect-timeout", "5"}
+		for _, n := range names[start:end] {
+			args = append(args, "-Q", "*DELE "+n)
+		}
+		args = append(args, url)
+		if out, err := exec.Command("curl", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
 }
 
 // curlUpload writes data to a scratch file and shells out to curl (installed

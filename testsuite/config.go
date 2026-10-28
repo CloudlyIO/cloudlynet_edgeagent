@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -31,6 +32,9 @@ type nanolinkConfig struct {
 		User           string        `yaml:"user"`
 		Pass           string        `yaml:"pass"`
 		UploadInterval time.Duration `yaml:"upload_interval"`
+		// Retention is how long each mock device keeps its own uploads on the
+		// FTP server; 0 keeps everything. Env: NANOLINK_FTP_RETENTION.
+		Retention time.Duration `yaml:"retention"`
 	} `yaml:"ftp"`
 	Scenario string `yaml:"scenario"`
 	// Devices is the optional fleet list (conf-file-only — no env equivalent).
@@ -63,6 +67,7 @@ func defaultNanolinkConfig() nanolinkConfig {
 	cfg.FTP.User = "nybsys"
 	cfg.FTP.Pass = ""
 	cfg.FTP.UploadInterval = 60 * time.Second
+	cfg.FTP.Retention = defaultFTPRetention
 	cfg.Scenario = string(loggen.ScenarioHappy)
 	return cfg
 }
@@ -110,6 +115,15 @@ func (c nanolinkConfig) withEnvOverrides() nanolinkConfig {
 	}
 	if v := os.Getenv("NANOLINK_SCENARIO"); v != "" {
 		c.Scenario = v
+	}
+	if v := strings.TrimSpace(os.Getenv("NANOLINK_FTP_RETENTION")); v != "" {
+		// A bad value keeps the conf/default retention rather than silently
+		// switching pruning off (which is what let the watch dir grow unbounded).
+		if d, err := time.ParseDuration(v); err != nil {
+			log.Printf("NANOLINK_FTP_RETENTION=%q is not a duration (e.g. 6h, 0 = keep everything); keeping %s", v, c.FTP.Retention)
+		} else {
+			c.FTP.Retention = d
+		}
 	}
 	return c
 }

@@ -54,6 +54,11 @@ func main() {
 	}
 
 	cl := collector.New(acs, ruleEngine, cfg.FTPWatchDir)
+	// Persist FTP ingest progress in the buffer DB so a restart resumes rather
+	// than re-parsing (and re-queuing) every upload still in the watch dir.
+	if err := cl.UseIngestLedger(buf); err != nil {
+		log.Printf("ftp ingest ledger unavailable, ingest progress will not survive a restart: %v", err)
+	}
 	w := worker.New(cfg, cloud.New(cfg.Enrollment.BaseURL, cfg.Enrollment.APIKey), acs, manifest, buf, cl)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

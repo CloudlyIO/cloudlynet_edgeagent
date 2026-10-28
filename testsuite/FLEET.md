@@ -69,7 +69,7 @@ never put real device serials or real network cell ids in tracked files.
 | --- | --- |
 | cwmp_id | `canonicalID(oui, product_class, serial)` per device (`-` → `%2D`), byte-matching the agent's encoding |
 | CWMP session loop | one per device against the agent ACS (Inform → GetRPCMethods → TransferComplete → ATC → task drain), Inform carrying the device's own DeviceID |
-| FTP upload loop | one per device with its own loggen cycle state; log content + filenames identity-rewritten to the owning device |
+| FTP upload loop | one per device with its own loggen cycle state; log content + filenames identity-rewritten to the owning device; each device deletes only its own uploads older than `ftp.retention` |
 | Connection request | one listener per device on port **30005 + index** (device 0 keeps the historical `:30005`); each device's store `Device.ManagementServer.ConnectionRequestURL` and its Inform advertise its own port (host from `NANOLINK_CR_HOST`, default the container hostname) |
 | Start stagger | deterministic `index * 700ms` offset per device so N devices don't thundering-herd the agent; device 0 starts immediately |
 | `/device/params` | optional `?device=<serial or cwmp_id>` selector (default: first device); unknown selector → 404 |

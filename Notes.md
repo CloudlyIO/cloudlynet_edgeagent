@@ -216,6 +216,24 @@ FTP loop and the log parser work end to end. With the `e2e` stack the same devic
   `redis-check-aof --fix appendonly.aof.manifest` inside `/data/appendonlydir` of the
   `cloudlynet_ai_redis_data` volume (same image the stack runs; back the `*.incr.aof` file up
   first), start redis, then `./scripts/kafka/compose.sh up` again.
+- **The FTP watch dir is pruned by the mock devices.** Each mock femtocell deletes its own uploads
+  older than `NANOLINK_FTP_RETENTION` (default `6h`; `0` keeps everything) over FTP (`DELE`), so the
+  `edgeagent_ftp` volume holds about six hours of logs instead of growing without bound (it reached
+  ~354,000 files / 1.4 GB in ~78 days before this). Files parked in a subdirectory are ignored by
+  both the agent and the pruning.
+- **An agent restart no longer replays the watch dir.** The agent records what it has ingested in
+  `buffer.sqlite` (`ftp_ingested`) and resumes from it; `buffer_max_bytes` now caps outbox payload
+  rather than the file size, so a large CWMP store or ledger can no longer wedge the outbox. If you
+  delete `buffer.sqlite`, the next start re-ingests whatever is in the watch dir once (the cloud
+  dedups the repeated events).
+- **The first start after upgrading replays the watch dir once.** An agent older than the ingest
+  ledger leaves no `ftp_ingested` rows, so the first start of the new binary re-parses every
+  `Log_*`/`ErrorLog_*` file in the watch dir, exactly as if `buffer.sqlite` had been deleted. On a
+  watch dir that was never pruned (the ~354,000-file case) that replay can overflow
+  `buffer_max_bytes`, and the cap then evicts the oldest outbox rows, unsent telemetry included.
+  Before upgrading an agent with a large unpruned watch dir, let its outbox drain, then prune the
+  old uploads or move them into a subdirectory of the watch dir (the agent skips directories). The
+  local demo was already handled this way on 2026-10-28.
 - **Teardown.** `docker compose --profile edgeagent down` stops the fleet only;
   `./scripts/kafka/compose.sh down` stops the whole stack. Volumes persist either way; add `-v`
   to wipe them.

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"cloudlynet_edgeagent/goagent/internal/buffer"
 	"cloudlynet_edgeagent/goagent/internal/cloud"
 	"cloudlynet_edgeagent/goagent/internal/cwmp"
 	"cloudlynet_edgeagent/goagent/internal/rules"
@@ -62,26 +63,107 @@ const resolveRetryTicks = 30
 // corrupt file is eventually abandoned instead of re-parsed forever.
 const maxParseRetries = 5
 
+// rewriteCheckTicks spaces the re-stat of already-ingested uploads (~30 ticks
+// == ~60s). Detecting a same-named file rewritten with new content needs a
+// stat per file; doing that for every seen file on every 2s poll is a
+// full-directory stat storm on a large watch dir. The first scan after start
+// always checks, which is what catches files rewritten while the agent was down.
+const rewriteCheckTicks = 30
+
 // maxLogBytes bounds the decompressed size read from a single-file gzip periodic
 // log (Log_*.gz / ErrorLog_*.gz) — generous for the tiny real slices (KB) while
 // capping a malformed/hostile gzip from ballooning memory.
 const maxLogBytes = 8 << 20
 
+// IngestLedger persists which FTP uploads are done with, so a restart resumes
+// instead of re-parsing the whole watch directory. *buffer.Buffer implements it.
+type IngestLedger interface {
+	LoadFTPIngested() (map[string]buffer.FTPStamp, error)
+	MarkFTPIngested(marks []buffer.FTPMark) error
+	ForgetFTPIngested(paths []string) error
+}
+
 // Collector reads device state from the in-agent CWMP ACS (params cached from
 // Informs + GPV responses) and parses NanoLink FTP log archives into events.
 type Collector struct {
-	acs        *cwmp.Server
-	rules      *rules.Engine
-	ftpDir     string
-	mu         sync.Mutex
-	events     []cloud.EventItem
-	seenPaths  map[string]struct{}
+	acs    *cwmp.Server
+	rules  *rules.Engine
+	ftpDir string
+	ledger IngestLedger
+
+	// mu guards events, eventMarks and requeued, which the WatchFTP goroutine
+	// and the worker share.
+	mu     sync.Mutex
+	events []cloud.EventItem
+	// eventMarks are the seen-marks of the uploads whose events sit in events.
+	// They leave with the events (DrainFTP) and are persisted only in the same
+	// transaction as the outbox insert, so an upload is never recorded as
+	// ingested while its events could still be lost.
+	eventMarks []eventMark
+	// requeued are drained marks whose outbox insert failed; the next scan
+	// forgets them so their files are parsed again.
+	requeued []buffer.FTPMark
+
+	// Owned by the WatchFTP goroutine (scanFTP).
+	seenPaths  map[string]buffer.FTPStamp
 	deferred   map[string]int
 	parseFails map[string]int
+	scans      int
+	// pendingMarks are marks of uploads that produced no events (nothing
+	// classifiable, or given up on). Nothing can be lost with them, so they
+	// are persisted straight from the scan; a failed write is retried.
+	pendingMarks []buffer.FTPMark
+}
+
+// eventMark ties an upload's seen-mark to its events: they are the events
+// before index end (exclusive) that follow the previous mark's end.
+type eventMark struct {
+	mark buffer.FTPMark
+	end  int
+}
+
+// FTPBatch is a hand-off of parsed FTP events with the seen-marks of the
+// uploads they came from. The receiver persists the marks only together with
+// the events (buffer.EnqueueWithMarks) and hands back the marks it could not
+// persist with Requeue.
+type FTPBatch struct {
+	Events []cloud.EventItem
+	marks  []eventMark
+}
+
+// MarksIn returns the marks of the uploads whose last event lies in
+// Events[start:end]. An upload split across several outbox bodies is marked
+// with the body that carries its last event, so a failure before that body
+// re-parses it (the cloud dedups the part already sent).
+func (b FTPBatch) MarksIn(start, end int) []buffer.FTPMark {
+	var out []buffer.FTPMark
+	for _, m := range b.marks {
+		if m.end > start && m.end <= end {
+			out = append(out, m.mark)
+		}
+	}
+	return out
 }
 
 func New(acs *cwmp.Server, ruleEngine *rules.Engine, ftpDir string) *Collector {
-	return &Collector{acs: acs, rules: ruleEngine, ftpDir: ftpDir, seenPaths: map[string]struct{}{}, deferred: map[string]int{}, parseFails: map[string]int{}}
+	return &Collector{acs: acs, rules: ruleEngine, ftpDir: ftpDir, seenPaths: map[string]buffer.FTPStamp{}, deferred: map[string]int{}, parseFails: map[string]int{}}
+}
+
+// UseIngestLedger makes FTP ingest progress survive restarts: it loads the
+// uploads already done with, persists the marks of event-less uploads, and
+// attaches every other mark to the drained FTPBatch for the outbox insert to
+// persist (buffer.EnqueueWithMarks on the same database). Call it before
+// WatchFTP starts. Without a ledger the collector keeps its
+// bookkeeping in memory only and re-parses the watch dir after a restart.
+func (c *Collector) UseIngestLedger(l IngestLedger) error {
+	seen, err := l.LoadFTPIngested()
+	if err != nil {
+		return err
+	}
+	c.ledger = l
+	c.seenPaths = seen
+	log.Printf("ftp ingest ledger: %d upload(s) already ingested", len(seen))
+	return nil
 }
 
 // Inventory builds the device inventory from the CWMP store, enriching liveness
@@ -172,18 +254,47 @@ func (c *Collector) Snapshot(ctx context.Context, cwmpID string) (map[string]any
 	return ToAnyMap(c.acs.Store().GetParams(cwmpID, SnapshotPaths)), nil
 }
 
-func (c *Collector) QueueEvents(events []cloud.EventItem) {
+// DrainFTP hands off the queued FTP events with their uploads' seen-marks.
+// Nothing is persisted here: see FTPBatch.
+func (c *Collector) DrainFTP() FTPBatch {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.events = append(c.events, events...)
+	out := FTPBatch{Events: c.events, marks: c.eventMarks}
+	c.events, c.eventMarks = nil, nil
+	return out
 }
 
-func (c *Collector) DrainEvents() []cloud.EventItem {
+// Requeue hands back drained marks whose events did not reach the outbox.
+// Their files are parsed again on the next scan (if still present), so a
+// failed enqueue costs duplicate events, which the cloud dedups, never lost
+// ones.
+func (c *Collector) Requeue(marks []buffer.FTPMark) {
+	if len(marks) == 0 {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := c.events
-	c.events = nil
-	return out
+	c.requeued = append(c.requeued, marks...)
+}
+
+// takeRequeued forgets requeued uploads so this scan re-parses them. A path
+// re-marked with a newer stamp since the drain is already a new upload.
+func (c *Collector) takeRequeued() {
+	c.mu.Lock()
+	marks := c.requeued
+	c.requeued = nil
+	c.mu.Unlock()
+	if len(marks) == 0 {
+		return
+	}
+	n := 0
+	for _, m := range marks {
+		if st, ok := c.seenPaths[m.Path]; ok && st == m.Stamp {
+			delete(c.seenPaths, m.Path)
+			n++
+		}
+	}
+	log.Printf("ftp ingest: %d upload(s) not queued to the outbox, re-parsing", n)
 }
 
 func (c *Collector) WatchFTP(ctx context.Context) {
@@ -202,11 +313,17 @@ func (c *Collector) WatchFTP(ctx context.Context) {
 	}
 }
 
+// ScanFTP runs one poll of the watch dir, as WatchFTP does on each tick.
+func (c *Collector) ScanFTP() { c.scanFTP() }
+
 func (c *Collector) scanFTP() {
+	c.takeRequeued()
 	entries, err := os.ReadDir(c.ftpDir)
 	if err != nil {
 		return
 	}
+	checkRewrites := c.scans%rewriteCheckTicks == 0
+	c.scans++
 	present := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !isLogUpload(e.Name()) {
@@ -214,8 +331,19 @@ func (c *Collector) scanFTP() {
 		}
 		path := filepath.Join(c.ftpDir, e.Name())
 		present[path] = struct{}{}
-		if _, ok := c.seenPaths[path]; ok {
-			continue
+		if st, ok := c.seenPaths[path]; ok {
+			if !checkRewrites {
+				continue
+			}
+			cur, err := stampOf(e)
+			if err != nil || cur == st {
+				continue
+			}
+			// Same name, different size/mtime: a new upload reusing the name
+			// (the periodic name has minute resolution). Ingest it again; the
+			// cloud's dedup keys absorb any lines the two versions share.
+			log.Printf("ftp upload changed since it was ingested (size/mtime), re-ingesting: %s", path)
+			delete(c.seenPaths, path)
 		}
 
 		if tick := c.deferred[path]; tick >= maxDeferTicks && (tick-maxDeferTicks)%resolveRetryTicks != 0 {
@@ -240,6 +368,12 @@ func (c *Collector) scanFTP() {
 			}
 			continue
 		}
+		// Stamp before parsing: if the file is rewritten after this point the
+		// next rewrite check sees a different stamp and re-ingests it.
+		stamp, err := stampOf(e)
+		if err != nil {
+			continue // vanished since ReadDir
+		}
 		events, err := c.parseUpload(path, deviceID)
 		if err != nil {
 			// Retry a bounded number of polls before giving up — a large .tgz
@@ -251,18 +385,19 @@ func (c *Collector) scanFTP() {
 				continue
 			}
 			log.Printf("ftp upload parse failed after %d attempts, giving up: %s: %v", maxParseRetries, path, err)
-			c.markSeen(path)
+			c.markSeen(path, stamp, nil)
 			continue
 		}
-		c.markSeen(path)
 		log.Printf("ftp ingest: %s -> %d event(s) [%s]", filepath.Base(path), len(events), deviceID)
-		c.QueueEvents(events)
+		c.markSeen(path, stamp, events)
 	}
-	// Keep seenPaths/deferred bounded by the directory contents: forget entries
-	// that have rotated away.
+	// Keep seenPaths/deferred (and the persisted ledger) bounded by the
+	// directory contents: forget entries that have rotated away.
+	var gone []string
 	for p := range c.seenPaths {
 		if _, ok := present[p]; !ok {
 			delete(c.seenPaths, p)
+			gone = append(gone, p)
 		}
 	}
 	for p := range c.deferred {
@@ -275,14 +410,83 @@ func (c *Collector) scanFTP() {
 			delete(c.parseFails, p)
 		}
 	}
+	c.persistScan(present, gone)
 }
 
-// markSeen records a path as fully processed and clears its deferral/retry
-// bookkeeping.
-func (c *Collector) markSeen(path string) {
-	c.seenPaths[path] = struct{}{}
+// persistScan writes this scan's ledger changes: rotated-away paths are
+// forgotten (and dropped from marks not yet persisted), and the marks of
+// event-less uploads are flushed. A mark already drained with its events can
+// still be persisted after its path was forgotten; the next start forgets it
+// again, so the ledger stays bounded.
+func (c *Collector) persistScan(present map[string]struct{}, gone []string) {
+	if c.ledger == nil {
+		return
+	}
+	if len(gone) > 0 {
+		if err := c.ledger.ForgetFTPIngested(gone); err != nil {
+			log.Printf("ftp ingest ledger: forgetting %d rotated path(s) failed: %v", len(gone), err)
+		}
+		c.pendingMarks = keepPresent(c.pendingMarks, present)
+		c.mu.Lock()
+		kept := c.eventMarks[:0]
+		for _, m := range c.eventMarks {
+			if _, ok := present[m.mark.Path]; ok {
+				kept = append(kept, m)
+			}
+		}
+		c.eventMarks = kept
+		c.mu.Unlock()
+	}
+	if len(c.pendingMarks) == 0 {
+		return
+	}
+	if err := c.ledger.MarkFTPIngested(c.pendingMarks); err != nil {
+		log.Printf("ftp ingest ledger: persisting %d mark(s) failed, will retry: %v", len(c.pendingMarks), err)
+		return
+	}
+	c.pendingMarks = nil
+}
+
+func keepPresent(marks []buffer.FTPMark, present map[string]struct{}) []buffer.FTPMark {
+	kept := marks[:0]
+	for _, m := range marks {
+		if _, ok := present[m.Path]; ok {
+			kept = append(kept, m)
+		}
+	}
+	return kept
+}
+
+// markSeen records a path as fully processed, clears its deferral/retry
+// bookkeeping, and queues its events. Its seen-mark travels with the events
+// when it has any (persisted with the outbox insert), else it is persisted
+// by this scan.
+func (c *Collector) markSeen(path string, stamp buffer.FTPStamp, events []cloud.EventItem) {
+	c.seenPaths[path] = stamp
 	delete(c.deferred, path)
 	delete(c.parseFails, path)
+	mark := buffer.FTPMark{Path: path, Stamp: stamp}
+	if len(events) == 0 {
+		if c.ledger != nil {
+			c.pendingMarks = append(c.pendingMarks, mark)
+		}
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, events...)
+	if c.ledger != nil {
+		c.eventMarks = append(c.eventMarks, eventMark{mark: mark, end: len(c.events)})
+	}
+}
+
+// stampOf reads the size+mtime identity of a directory entry.
+func stampOf(e os.DirEntry) (buffer.FTPStamp, error) {
+	fi, err := e.Info()
+	if err != nil {
+		return buffer.FTPStamp{}, err
+	}
+	return buffer.FTPStamp{Size: fi.Size(), ModTime: fi.ModTime().UnixNano()}, nil
 }
 
 // isLogUpload matches the NanoLink FTP upload shapes the agent ingests. At
