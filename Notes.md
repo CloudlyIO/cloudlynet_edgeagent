@@ -140,12 +140,17 @@ services:
       - maveric
 ```
 
-Rate limit note: the gateway's `/v1/agent/**` per-IP budget is a fixed 120 requests/min on
-`main`, sized for one device. Fourteen devices behind one agent IP still onboard and push
-telemetry fine, but TR-069 command applies can time out under the resulting 429s. The env knob
-`AGENT_RATE_LIMIT_PER_MIN` exists only on the local gateway branch `feat/agent-rate-limit-env`
-(not merged); if you need command traffic, check that branch out and add
-`gateway: environment: AGENT_RATE_LIMIT_PER_MIN: "900"` to this override.
+Rate limit note: the gateway's `/v1/agent/**` per-IP budget defaults to 120 requests/min, sized
+for one device. Fourteen devices behind one agent IP still onboard and push telemetry at that
+budget, but TR-069 command applies time out under the resulting 429s and get rolled back. Raise
+it with `AGENT_RATE_LIMIT_PER_MIN` (on gateway `main` since PR #25) by adding this to the same
+override, then recreate the gateway (`./scripts/kafka/compose.sh e2e`):
+
+```yaml
+  gateway:
+    environment:
+      AGENT_RATE_LIMIT_PER_MIN: "900"
+```
 
 ## 6. Bring the fleet up and verify it is pushing telemetry and logs
 
