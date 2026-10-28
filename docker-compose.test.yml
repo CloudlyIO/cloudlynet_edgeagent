@@ -61,6 +61,9 @@ services:
       # One of: happy | ftp-path-reject | ftp-auth-fail | ftp-conn-fail |
       # ftp-timeout | atc-fault | reboot (see testsuite/README.md).
       NANOLINK_SCENARIO: ${EDGEAGENT_TESTSUITE_SCENARIO:-happy}
+      # How long each mock device keeps its own uploads on vsftpd before
+      # deleting them over FTP. Empty = testsuite default (6h); 0 = keep all.
+      NANOLINK_FTP_RETENTION: ${EDGEAGENT_TESTSUITE_FTP_RETENTION:-}
       # Device identity for acsftp (distinct cwmp_ids). Empty = conf default.
       NANOLINK_OUI: ${EDGEAGENT_TESTSUITE_OUI:-}
       NANOLINK_PRODUCT_CLASS: ${EDGEAGENT_TESTSUITE_PRODUCT_CLASS:-}

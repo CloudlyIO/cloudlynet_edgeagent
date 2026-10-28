@@ -21,7 +21,8 @@
 - T1 (live liveness/UE counts), T2 (RF/coverage), T3 (PM + hardware + bounded `Device.FaultMgmt.CurrentAlarm.{i}` alarms). Each tier is read from the CWMP parameter cache (refreshed by queued `GetParameterValues`) and POSTed at its cadence; devices with no readable metric are skipped.
 - `AutonomousTransferComplete` is answered with the empty response so the session survives — this obsoletes the old per-device ATC-policy=None stopgap (`EnsureBaseline` / `Worker.baselined`, both removed). An `autonomous_transfer_complete` event is emitted into the telemetry batch on each ATC.
 - Registration is retried on heartbeat until CloudlyNet accepts it, allowing a late gateway/port-forward to recover without restarting the agent.
-- FTP `seenTGZ` set is pruned to the current directory each scan to stay bounded.
+- FTP ingest progress (`ftp_ingested` in `buffer_db`, path + size + mtime) survives restarts: a restart ingests only new, still-deferred, still-retrying or rewritten uploads. An upload is marked in the same transaction as the outbox row holding its events (`Buffer.EnqueueWithMarks`); a failed insert hands the marks back (`Collector.Requeue`) so the file is re-parsed, never lost. Large batches are split into bodies of at most `buffer_max_bytes/8`. The ledger is pruned to the current directory each scan. See README "Restart and buffer semantics".
+- `buffer_max_bytes` caps outbox payload bytes (not the SQLite file); an under-cap enqueue reads no queued payload; over cap, the oldest outbox rows are evicted in one statement per enqueue, and free pages are reclaimed with `auto_vacuum=INCREMENTAL`.
 
 ## Impacted Modules
 - `goagent`: production edge-agent binary. `collector/metrics.go` holds the tiered metric/alarm catalogue (the place to correct PM paths).

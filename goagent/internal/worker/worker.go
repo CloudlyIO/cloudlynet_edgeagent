@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -115,18 +116,85 @@ func (w *Worker) pushTier(ctx context.Context, tier int) {
 		log.Printf("collect tier %d failed: %v", tier, err)
 		return
 	}
-	// FTP-log events + CWMP events (incl. ATC) share the telemetry batch.
-	events := append(w.col.DrainEvents(), w.drainCWMPEvents()...)
+	// FTP-log events + CWMP events (incl. ATC) share the telemetry batch. The
+	// FTP events come first so the batch's mark indices stay valid.
+	ftp := w.col.DrainFTP()
+	events := append(ftp.Events, w.drainCWMPEvents()...)
 	req := cloud.TelemetryRequest{Metrics: metrics, Events: events, Alarms: alarms}
 	if len(req.Metrics) == 0 && len(req.Events) == 0 && len(req.Alarms) == 0 {
 		return
 	}
-	body, _ := json.Marshal(req)
-	if err := w.buf.Enqueue(ctx, "telemetry", body); err != nil {
-		log.Printf("telemetry enqueue failed: %v", err)
+	if !w.enqueueTelemetry(ctx, req, ftp) {
 		return
 	}
 	w.flushOutbox(ctx)
+}
+
+// enqueueTelemetry queues req, split into as many bodies as buffer_max_bytes
+// requires, and persists each FTP upload's ingest mark in the same transaction
+// as the body carrying its last event. On a failed insert the marks of that
+// body and every later one are handed back to the collector unpersisted, so
+// their files are re-parsed rather than lost. Reports whether anything was
+// queued.
+func (w *Worker) enqueueTelemetry(ctx context.Context, req cloud.TelemetryRequest, ftp collector.FTPBatch) bool {
+	parts := splitTelemetry(req, w.buf.MaxBytes()/partsPerCap)
+	queued := false
+	for i, p := range parts {
+		marks := ftp.MarksIn(p.start, p.end)
+		err := w.buf.EnqueueWithMarks(ctx, "telemetry", p.body, marks)
+		if errors.Is(err, buffer.ErrPayloadTooLarge) {
+			// Unsplittable (one event, or metrics/alarms alone) and larger than
+			// the whole cap: it can never be queued, so retrying would loop.
+			// Drop it and record its uploads as done.
+			log.Printf("telemetry dropped: %v", err)
+			if len(marks) > 0 {
+				if err := w.buf.MarkFTPIngested(marks); err != nil {
+					w.col.Requeue(marks)
+				}
+			}
+			continue
+		}
+		if err != nil {
+			log.Printf("telemetry enqueue failed (%d of %d part(s) not queued): %v", len(parts)-i, len(parts), err)
+			w.col.Requeue(ftp.MarksIn(p.start, len(req.Events)))
+			return queued
+		}
+		queued = true
+	}
+	return queued
+}
+
+// partsPerCap sets the largest body a telemetry batch is split into, as a
+// fraction of buffer_max_bytes: a backlog burst then lands as several rows
+// rather than one body near the cap that would evict the whole queue, and
+// stays well under the cap's single-body limit.
+const partsPerCap = 8
+
+// telemetryPart is one outbox body covering req.Events[start:end].
+type telemetryPart struct {
+	body       []byte
+	start, end int
+}
+
+// splitTelemetry marshals req into bodies no larger than maxBytes (0 = one
+// body), halving the event list until each part fits. Metrics and alarms ride
+// with the first part. A part that cannot be split further is returned as is;
+// the outbox refuses it only if it exceeds the whole cap.
+func splitTelemetry(req cloud.TelemetryRequest, maxBytes int64) []telemetryPart {
+	var out []telemetryPart
+	var split func(r cloud.TelemetryRequest, start int)
+	split = func(r cloud.TelemetryRequest, start int) {
+		body, _ := json.Marshal(r)
+		if maxBytes <= 0 || int64(len(body)) <= maxBytes || len(r.Events) <= 1 {
+			out = append(out, telemetryPart{body: body, start: start, end: start + len(r.Events)})
+			return
+		}
+		mid := len(r.Events) / 2
+		split(cloud.TelemetryRequest{Metrics: r.Metrics, Alarms: r.Alarms, Events: r.Events[:mid]}, start)
+		split(cloud.TelemetryRequest{Events: r.Events[mid:]}, start+mid)
+	}
+	split(req, 0)
+	return out
 }
 
 // drainCWMPEvents pulls buffered CWMP events (e.g. autonomous_transfer_complete)

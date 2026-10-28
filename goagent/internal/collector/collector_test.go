@@ -157,7 +157,7 @@ func TestScanFTPSkipsParkedShapes(t *testing.T) {
 	})
 
 	c.scanFTP()
-	if events := c.DrainEvents(); len(events) != 0 {
+	if events := c.DrainFTP().Events; len(events) != 0 {
 		t.Fatalf("parked .tgz/Devicelog must not be ingested via scanFTP; got %+v", events)
 	}
 }
@@ -243,7 +243,7 @@ func TestScanFTPKeepsDeferringUnknownDevice(t *testing.T) {
 	// no events, never marked seen, still tracked as deferred.
 	for i := 0; i < maxDeferTicks+2*resolveRetryTicks; i++ {
 		c.scanFTP()
-		if events := c.DrainEvents(); len(events) != 0 {
+		if events := c.DrainFTP().Events; len(events) != 0 {
 			t.Fatalf("tick %d: events = %+v, want none while unresolved", i, events)
 		}
 	}
@@ -263,7 +263,7 @@ func TestScanFTPKeepsDeferringUnknownDevice(t *testing.T) {
 	ingested := false
 	for i := 0; i <= resolveRetryTicks && !ingested; i++ {
 		c.scanFTP()
-		if events := c.DrainEvents(); len(events) != 0 {
+		if events := c.DrainFTP().Events; len(events) != 0 {
 			if len(events) != 1 || events[0].CWMPID != testCanonicalID {
 				t.Fatalf("events = %+v after late onboard, want exactly 1 on %s", events, testCanonicalID)
 			}
@@ -294,7 +294,7 @@ func TestScanFTPPeriodicLogGzIngested(t *testing.T) {
 	})
 
 	c.scanFTP()
-	events := c.DrainEvents()
+	events := c.DrainFTP().Events
 	if len(events) != 2 {
 		t.Fatalf("events = %d, want 2: %+v", len(events), events)
 	}
@@ -328,7 +328,7 @@ func TestScanFTPErrorLogGzIngested(t *testing.T) {
 	})
 
 	c.scanFTP()
-	events := c.DrainEvents()
+	events := c.DrainFTP().Events
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1: %+v", len(events), events)
 	}
@@ -373,7 +373,7 @@ func TestPeriodicLogAndErrorLogShareDedupKey(t *testing.T) {
 	writeGzipLog(t, dir, "ErrorLog_20240613.1758+0800_"+testOUI+"."+testSerial+".gz", []string{alarm})
 
 	c.scanFTP()
-	events := c.DrainEvents()
+	events := c.DrainFTP().Events
 	if len(events) != 2 {
 		t.Fatalf("events = %d, want 2 (one per file, pre-cloud-dedup): %+v", len(events), events)
 	}
@@ -400,7 +400,7 @@ func TestScanFTPIgnoresForensicArtifacts(t *testing.T) {
 	writeRingArchive(t, dir, base+"varlog.tgz", map[string][]string{"messages": {"Jan  1 00:00:00 kernel: something failed"}})
 
 	c.scanFTP()
-	if events := c.DrainEvents(); len(events) != 0 {
+	if events := c.DrainFTP().Events; len(events) != 0 {
 		t.Fatalf("forensic artifacts must not produce events; got %+v", events)
 	}
 }
@@ -417,7 +417,7 @@ func TestScanFTPColdStartRace(t *testing.T) {
 	writeGzipLog(t, dir, path, []string{"0000000217 2024-06-02 23:51:22.814 [FILE_TRANS] File upload success, curl code=(0), command (...)"})
 
 	c.scanFTP()
-	if events := c.DrainEvents(); len(events) != 0 {
+	if events := c.DrainFTP().Events; len(events) != 0 {
 		t.Fatalf("events = %+v before onboard, want none", events)
 	}
 
@@ -427,7 +427,7 @@ func TestScanFTPColdStartRace(t *testing.T) {
 	})
 
 	c.scanFTP()
-	events := c.DrainEvents()
+	events := c.DrainFTP().Events
 	if len(events) != 1 {
 		t.Fatalf("events = %d after onboard, want 1: %+v", len(events), events)
 	}

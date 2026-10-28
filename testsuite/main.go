@@ -66,11 +66,17 @@ func main() {
 	ftpDir := env("FTP_DIR", "/ftp")
 	_ = os.MkdirAll(ftpDir, 0o755)
 	ftpCfg := ftpUploadConfig{
-		host:     cfg.FTP.Host,
-		user:     cfg.FTP.User,
-		pass:     cfg.FTP.Pass,
-		interval: cfg.FTP.UploadInterval,
-		scenario: loggen.Scenario(cfg.Scenario),
+		host:      cfg.FTP.Host,
+		user:      cfg.FTP.User,
+		pass:      cfg.FTP.Pass,
+		interval:  cfg.FTP.UploadInterval,
+		scenario:  loggen.Scenario(cfg.Scenario),
+		retention: cfg.FTP.Retention,
+	}
+	if ftpCfg.retention > 0 {
+		log.Printf("ftp retention: each device deletes its own uploads older than %s", ftpCfg.retention)
+	} else {
+		log.Printf("ftp retention: disabled, uploads are kept forever")
 	}
 
 	// The mock devices dial the agent's ACS, retrying until the agent is up.

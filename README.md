@@ -46,10 +46,64 @@ testsuite/            # NanoLink emulator: mock cloud + mock CWMP device + FTP (
 - Treats every device write as a closed-loop operation: after `SetParameterValues`, waits `command_verify_delay`, then reads back with `GetParameterValues` until all requested values match or `command_verify_timeout` expires (15s in production). A failed acknowledgement includes the actual read-back, so the dashboard can show the device value that prevented the update.
 - Retries registration on heartbeat until CloudlyNet accepts it, so a late gateway/port-forward does not require restarting the agent container.
 - Emits lifecycle logs (startup, `[CWMP] ACS listening on …`, per-Inform/ATC, per-command result) for observability.
-- Uses local SQLite for telemetry outbox retry, applied-command dedupe, and the CWMP device/parameter/event store.
+- Uses local SQLite for telemetry outbox retry, applied-command dedupe, the CWMP device/parameter/event store, and the FTP ingest ledger (see **Restart and buffer semantics** below).
 - **Is the ACS:** it answers the device's Inform and `AutonomousTransferComplete` (the RPC GenieACS never handled), reads via `GetParameterValues`, writes via `SetParameterValues`, walks `GetParameterNames` once on first contact for authoritative writability, and reboots — all over the in-agent `:7547` listener. An optional connection-request trigger sharpens apply latency below the device's ~60 s inform cadence.
 - Emits an `autonomous_transfer_complete` event on each ATC into the telemetry batch (smo-sim ingests it).
-- Parses FTP log uploads into deterministic telemetry events using `config/rules.yaml` — the routine periodic feed (`Log_*.gz`/`ErrorLog_*.gz`, single-file gzip), the reboot-dump `continuouslogging.tgz` ring, and the bare `Devicelog`; the module is read from each line's inline `[MODULE]` tag and the device from the filename's OUI+serial, and the processed-upload set is pruned to the current directory contents so it stays bounded.
+- Parses FTP log uploads into deterministic telemetry events using `config/rules.yaml` — the routine periodic feed (`Log_*.gz`/`ErrorLog_*.gz`, single-file gzip; intake of the reboot-dump `continuouslogging.tgz` ring and the bare `Devicelog` is parked); the module is read from each line's inline `[MODULE]` tag and the device from the filename's OUI+serial, and the processed-upload set is pruned to the current directory contents so it stays bounded.
+
+### Restart and buffer semantics
+
+- **FTP ingest progress survives a restart.** Each upload the collector is done with (parsed, or
+  given up on after 5 failed parses) is recorded in the `ftp_ingested` table of `buffer_db`, keyed
+  by path and stamped with size + mtime. On start the agent loads that ledger, so a restart only
+  ingests what it has not finished: uploads that arrived while it was down, uploads still deferred
+  because no Inform has named their device yet (never persisted as seen, never emitted under a
+  made-up id), and uploads whose parse was still being retried (the retry budget restarts). A parsed
+  upload's mark is written in the same SQLite transaction as the outbox row that carries its
+  events, so a crash, a SIGTERM or a failed insert (for example disk full) before that commit
+  leaves the file unmarked: the worker hands the marks back and the next scan (or the next start)
+  re-parses it, and the cloud's dedup keys absorb any duplicates. The one exception is a single
+  telemetry part larger than the whole cap: it can never be queued, so it is dropped with a
+  `telemetry dropped` log line and its uploads are marked done rather than re-parsed forever. Uploads that yield no
+  events (nothing classifiable, or given up on) are marked directly by the scan.
+- **Upgrading from an older agent replays the watch dir once.** Older agents kept no ledger, so
+  the first start of this version finds `ftp_ingested` empty and re-parses every `Log_*`/`ErrorLog_*`
+  file still in `ftp_watch_dir`, exactly once (the same happens after `buffer.sqlite` is deleted).
+  The cloud's dedup keys absorb the repeated events, but on a box whose watch dir was never pruned
+  the replay can be large: it is split into outbox rows, and if it overflows `buffer_max_bytes` the
+  payload cap evicts the oldest rows, including telemetry that was queued before the upgrade and
+  not yet sent. Before upgrading such a box, let the outbox drain, then prune old uploads or move
+  them into a subdirectory of the watch dir (the collector skips directories). The agent does not
+  seed the ledger itself: it cannot tell an old upload it already sent from one that arrived while
+  it was down.
+- **A large telemetry batch is split, not refused.** A tier push whose events would make a body
+  larger than `buffer_max_bytes / 8` is split into several outbox rows (metrics and alarms ride in
+  the first). An upload split across rows is marked with the row that carries its last event. Only
+  a single event larger than the whole cap is dropped (logged as `telemetry dropped`), and its
+  upload is marked done so it is not re-parsed forever.
+- **A rewritten file is a new upload.** A same-named file whose size or mtime differs from the
+  ledger stamp is ingested again (the cloud's dedup keys absorb repeated lines). Already-ingested
+  files are re-stat'ed on the first scan after start and then every ~60 s, not on every 2 s poll, so
+  a large watch dir does not cost a full stat sweep per poll.
+- **The ledger stays bounded by the directory.** Paths that leave the watch dir are deleted from it
+  on the next scan. Ledger writes are batched (one transaction per scan or outbox insert, 5,000 rows
+  per commit), so a first run over a large backlog is not an fsync per file. The agent does not rotate
+  the watch dir itself; whoever writes to it must prune it (the testsuite does, see
+  `testsuite/README.md`).
+- **`buffer_max_bytes` caps outbox payload, not the file.** The cap (default 100 MiB) is compared
+  with the sum of queued telemetry bodies. The `applied`, `cwmp_*` and `ftp_ingested` tables and
+  SQLite free pages do not count. An enqueue under the cap costs one `SUM(length(body))`, which
+  SQLite answers from record headers without reading the queued payload. When a new body would
+  exceed the cap, the oldest outbox rows are evicted in one `DELETE ... WHERE id <= ?`, inside the
+  insert's transaction (the bound is found by walking row lengths, again without reading bodies),
+  and the eviction is logged with its row count; drain order stays strictly FIFO. A single body
+  larger than the whole cap is refused instead of emptying the outbox for it.
+- **The file is reclaimed incrementally.** `buffer_db` runs with `auto_vacuum=INCREMENTAL`; once
+  more than 4 MiB of free pages accumulate after a drain or an eviction, they are returned to the
+  filesystem with `PRAGMA incremental_vacuum`. A database created by an older agent
+  (`auto_vacuum=NONE`) is converted with one `VACUUM` when it is opened; if that fails the agent
+  logs it and carries on, reusing free pages without shrinking the file. No full `VACUUM` runs in
+  steady state.
 
 ## Telemetry tiering (handover §3.4)
 

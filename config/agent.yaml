@@ -17,4 +17,7 @@ cwmp:
 ftp_watch_dir: "/srv/nybsys-ftp/nybsysftp/uploads"
 rules_file: "/etc/cloudlynet-agent/rules.yaml"
 buffer_db: "/var/lib/cloudlynet-agent/buffer.sqlite"
+# Caps queued outbox PAYLOAD (sum of telemetry bodies), not the file size: the
+# applied/cwmp_*/ftp_ingested tables and free pages do not count. Over the cap
+# the oldest outbox rows are evicted (logged with a count).
 buffer_max_bytes: 104857600

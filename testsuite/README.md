@@ -41,6 +41,15 @@ Three containers on one Docker network, one shared volume (`edgeagent_ftp`) as t
 The mock device uploads via real `curl → vsftpd → volume` (not a direct volume write); the agent's
 `WatchFTP` picks the files up from there.
 
+**Upload retention.** Each mock device also deletes its own uploads (`Log_`/`ErrorLog_` names
+carrying its `OUI.serial`) once they are older than `ftp.retention` (default `6h`; `0` keeps
+everything), through the same hop: `curl --list-only` (NLST) then `curl -I -Q "*DELE <name>"`
+(the bundled vsftpd has `write_enable=YES`, which allows `DELE`). It sweeps on its first upload and
+every 10th upload after (~10 min at the 60 s cadence), up to 200 deletes per curl call, so the
+watch dir holds a bounded recent window instead of growing forever. The age comes from the
+timestamp in the filename; names that do not parse, other devices' uploads and subdirectories are
+never touched. A failed sweep is logged and retried on the next one.
+
 ## Quick start
 
 ```sh
@@ -216,6 +225,7 @@ Optional file `conf/nanolink.conf` (all fields default; env vars win over the fi
 | `ftp.user`               | `nybsys`        | `FTP_USER`               |
 | `ftp.pass`               | _(empty)_       | `FTP_PASS`               |
 | `ftp.upload_interval`    | `60s`           | —                        |
+| `ftp.retention`          | `6h`            | `NANOLINK_FTP_RETENTION` (`0` = keep everything; an unparseable value keeps the conf/default) |
 | `scenario`               | `happy`         | `NANOLINK_SCENARIO`      |
 | `devices`                | _(unset)_       | — (conf-file-only)       |
 
@@ -243,6 +253,7 @@ Compose-level overrides (all optional, with defaults):
 | `EDGEAGENT_TESTSUITE_MODE`     | `full`                         | `full` / `acs` / `acsftp` (see Debug modes)  |
 | `EDGEAGENT_CWMP_PORT`          | `7547`                         | host port for the agent's CWMP ACS           |
 | `FTP_USER` / `FTP_PASS`        | `nybsys` / `nybsys-local-test` | vsftpd + device credentials                  |
+| `EDGEAGENT_TESTSUITE_FTP_RETENTION` | _(empty → `6h`)_          | upload retention per device (→ `NANOLINK_FTP_RETENTION`; `0` keeps everything) |
 
 ## Log generation
 
