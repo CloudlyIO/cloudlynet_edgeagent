@@ -25,7 +25,7 @@ submodule), and every command runs from there.
 `localhost:3000`.
 
 ```bash
-./scripts/kafka/compose.sh up            # or: ./scripts/kafka/compose.sh e2e
+./scripts/compose.sh up            # or: ./scripts/compose.sh up --frontend
 curl -s localhost:8080/v1/health | jq .data.status   # gateway -> "ok"
 curl -s localhost:8002/health   | jq .data.status   # smo_sim -> "ok"
 ```
@@ -144,7 +144,7 @@ Rate limit note: the gateway's `/v1/agent/**` per-IP budget defaults to 120 requ
 for one device. Fourteen devices behind one agent IP still onboard and push telemetry at that
 budget, but TR-069 command applies time out under the resulting 429s and get rolled back. Raise
 it with `AGENT_RATE_LIMIT_PER_MIN` (on gateway `main` since PR #25) by adding this to the same
-override, then recreate the gateway (`./scripts/kafka/compose.sh e2e`):
+override, then recreate the gateway (`./scripts/compose.sh up --frontend`):
 
 ```yaml
   gateway:
@@ -220,7 +220,7 @@ FTP loop and the log parser work end to end. With the `e2e` stack the same devic
   `copilot-backend` and `copilot-mcp-server` from starting. Fix: stop redis, run
   `redis-check-aof --fix appendonly.aof.manifest` inside `/data/appendonlydir` of the
   `cloudlynet_ai_redis_data` volume (same image the stack runs; back the `*.incr.aof` file up
-  first), start redis, then `./scripts/kafka/compose.sh up` again.
+  first), start redis, then `./scripts/compose.sh up` again.
 - **The FTP watch dir is pruned by the mock devices.** Each mock femtocell deletes its own uploads
   older than `NANOLINK_FTP_RETENTION` (default `6h`; `0` keeps everything) over FTP (`DELE`), so the
   `edgeagent_ftp` volume holds about six hours of logs instead of growing without bound (it reached
@@ -240,5 +240,5 @@ FTP loop and the log parser work end to end. With the `e2e` stack the same devic
   old uploads or move them into a subdirectory of the watch dir (the agent skips directories). The
   local demo was already handled this way on 2026-10-28.
 - **Teardown.** `docker compose --profile edgeagent down` stops the fleet only;
-  `./scripts/kafka/compose.sh down` stops the whole stack. Volumes persist either way; add `-v`
+  `./scripts/compose.sh down` stops the whole stack. Volumes persist either way; add `-v`
   to wipe them.
