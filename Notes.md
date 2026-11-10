@@ -1,8 +1,12 @@
 # Femto Fleet — Local Bring-up
 
 A 14-device mock NanoLink femtocell fleet runs on a laptop against the real platform path
-(gateway → smo_sim → postgres) in roughly 15 minutes. Fleet mode ships on `main` since PR #4
-(2026-09-23); nothing needs a feature branch.
+(gateway → smo_sim → postgres). Fleet mode ships on `main` since PR #4 (2026-09-23).
+
+**It is one command now.** What used to be seven manual steps — minting a token by hand, running a
+Python generator into a gitignored conf, authoring a `docker-compose.override.yaml` with two extra
+services — is `./scripts/compose.sh up --femtofleet`. The override file is gone: `ftp`, `ftp-init`,
+`CWMP_CR_URL_OVERRIDE` and `NANOLINK_CONF_FILE` are all in the root `docker-compose.yaml`.
 
 All paths below are relative to the `cloudlynet_ai` repo root (the parent repo that carries this
 submodule), and every command runs from there.
@@ -15,160 +19,55 @@ submodule), and every command runs from there.
 - Docker Desktop running, about 8 GB free for images.
 - Root `.env`: `cp .env.example .env` (the root `.env` is untracked). Gateway and frontend `.env`
   files are bootstrapped from their `.env.example` by `compose.sh`; both default to local bypass
-  mode (`DEV_BYPASS_JWT=true`, tenant `00000000-0000-0000-3029-000000000001`), so no Cognito
-  login is needed.
-- `curl` and `jq` on the host for the checks below.
+  mode (`DEV_BYPASS_JWT=true`), so no Cognito login is needed.
+- `curl` and `jq` on the host.
 
-## 2. Start the platform stack
-
-`up` gives you infra plus all app services; use `e2e` instead if you also want the dashboard on
-`localhost:3000`.
+## 2. Bring the fleet up
 
 ```bash
-./scripts/compose.sh up            # or: ./scripts/compose.sh up --frontend
-curl -s localhost:8080/v1/health | jq .data.status   # gateway -> "ok"
-curl -s localhost:8002/health   | jq .data.status   # smo_sim -> "ok"
+./scripts/compose.sh up --femtofleet              # add --frontend for the dashboard on :3000
 ```
 
-The `edgeagent` profile is deliberately not part of `up` or `e2e`: it needs an enrollment token
-and a fleet conf first (steps 3 to 5) and starts in step 6.
+That starts infra + apps + the `edgeagent` profile, then runs `scripts/femtofleet.sh`, which waits
+for the gateway and smo-sim, resolves the fleet conf, and starts the agent, the testsuite (the 14
+mock devices), the FTP server and its one-shot init.
 
-## 3. Create an edge and mint its enrollment token
+**The testsuite container *is* the fleet**, not a test harness. `acsftp` mode disables only the
+mock *cloud*; the mock *devices* are constructed and launched before the mode branch. Without this
+container the agent has zero devices.
 
-One edge stands for the box the 14 femtocells sit behind. The token is returned exactly once
-(only its hash is stored): copy it, you paste it into the override in step 5.
+The conf is committed at `scripts/femtofleet.conf`: 14 devices, synthetic serials `2205610001` to
+`2205610014`, PCI 101–114, cell identity 10000001–10000014, RS power −10 dBm. Use your own with
+`./scripts/femtofleet.sh --conf path/to/fleet.conf` or `$FEMTOFLEET_CONF`. The serials and cell ids
+are placeholders by convention: **never put real device serials or real cell ids in a tracked
+file.**
 
-```bash
-TID=00000000-0000-0000-3029-000000000001
-curl -s -X POST localhost:8080/v1/tenants/$TID/custom/nybsys/edge-devices \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"femto-fleet-local"}' | jq .data
-# -> { "edge_id": "...", "name": "femto-fleet-local", "enrollment_token": "eyJ..." }
-```
+### Enrolment: nothing to mint
 
-Keep the token out of git. Running the call again creates a second edge; remove extras with
-`DELETE localhost:8080/v1/tenants/$TID/custom/nybsys/edge-devices/{edge_id}` (cascades that
-edge's devices, KPIs and events).
+The agent enrols with the token baked into `docker-compose.yaml` as the default for
+`CLOUDLYNET_ENROLLMENT_TOKEN`, which maps to the seeded local edge. You do not need to create an
+edge or copy a token.
 
-## 4. Write the 14-device fleet conf (synthetic identities)
+> **Do not mint a new edge to "start clean".** A device is pinned to the **first** edge that
+> reported it: smo-sim's upsert is `ON CONFLICT (tenant_id, cwmp_id) DO UPDATE SET ...` with
+> `edge_id` deliberately absent from the SET list (`ingest_service.py:57`). On a machine where this
+> fleet has run before, a new edge therefore stays **empty** while the agent authenticates as it
+> and the 14 devices keep reporting through the old edge. `:9100/health` still shows 14/14 and
+> commands route to an agent that is not running — every check passes while nothing works.
+>
+> `./scripts/femtofleet.sh --mint [--edge NAME]` exists for a genuinely fresh tenant. It warns
+> before walking into the above.
 
-Fleet mode is switched on by a `devices:` list in the NanoLink conf; the full schema and rules
-are in `submodule/cloudlynet_edgeagent/testsuite/FLEET.md`. Every serial must be unique and every
-param value must be a quoted YAML string. This generator writes 14 synthetic devices (PCI 101 to
-114, cell identity 10000001 to 10000014, RS power -10 dBm) into the gitignored `docs/task_docs/`
-folder:
+## 3. Verify
 
-```bash
-mkdir -p docs/task_docs && python3 - <<'EOF'
-P  = "Device.Services.FAPService.1.CellConfig.LTE.RAN"
-SS = "Device.PeriodicStatistics.SampleSet.1.Parameter"   # 316 = PRB DL %, 412 = SINR dB
-out = ['identity:', '  oui: "8C1F64"', '  product_class: "ENB-N03002-B3"', '',
-       'ftp:', '  host: "ftp"', '  user: "nybsys"', '  pass: ""', '  upload_interval: 60s', '',
-       'scenario: "happy"', '', 'devices:']
-for i in range(1, 15):
-    out += [f'  - serial: "22056100{i:02d}"', '    params:',
-            f'      {P}.RF.PhyCellID: "{100 + i}"',
-            f'      {P}.Common.CellIdentity: "{10000000 + i}"',
-            f'      {P}.RF.EARFCNDL: "1850"',
-            f'      {P}.RF.ReferenceSignalPower: "-10"',
-            f'      {SS}.316.X_8C1F64_CurrentValue: "{35 + (i % 5) * 9}"',
-            f'      {SS}.412.X_8C1F64_CurrentValue: "{12.5 - (i % 5) * 0.7:.1f}"']
-open("docs/task_docs/fleet.conf", "w").write("\n".join(out) + "\n")
-print("wrote docs/task_docs/fleet.conf (14 devices)")
-EOF
-```
-
-The `22056100xx` serials and `1000000x` cell identities are placeholders by convention: never put
-real device serials or real cell ids in a tracked file.
-
-## 5. Compose override: FTP server + fleet wiring
-
-Create `docker-compose.override.yaml` at the repo root (gitignored; `docker compose` merges it
-automatically). It points the agent at the real local gateway, switches the testsuite into fleet
-mode, and adds the vsftpd server the fleet uploads its logs to (the root compose has none). The
-FTP volume is the same one the agent watches, so uploads land in its ingest directory directly.
-
-```yaml
-services:
-  cloudlynet-edgeagent:
-    environment:
-      CLOUDLYNET_ENROLLMENT_TOKEN: <token from step 3>
-      CLOUDLYNET_BASE_URL: http://maveric_gateway:8080
-      CWMP_CR_URL_OVERRIDE: ""        # fleet mode: each device advertises its own CR URL
-
-  cloudlynet-edgeagent-testsuite:
-    environment:
-      TESTSUITE_MODE: acsftp          # talk to the real platform, mock cloud off
-      NANOLINK_CONF: /conf/fleet.conf
-      FTP_PASS: nybsys-local-test
-    volumes:
-      - ./docs/task_docs/fleet.conf:/conf/fleet.conf:ro
-    depends_on:
-      ftp:
-        condition: service_healthy
-
-  ftp:
-    image: delfer/alpine-ftp-server
-    container_name: nanolink_local_ftp
-    restart: unless-stopped
-    profiles: ["edgeagent"]
-    environment:
-      USERS: nybsys|nybsys-local-test|/home/vsftpd/nybsys
-      ADDRESS: ftp
-      MIN_PORT: "21100"
-      MAX_PORT: "21110"
-    volumes:
-      - edgeagent_ftp:/home/vsftpd/nybsys
-    depends_on:
-      ftp-init:
-        condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 21"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-    networks:
-      - maveric
-
-  ftp-init:
-    image: alpine:3.20
-    profiles: ["edgeagent"]
-    command: ["sh", "-c", "mkdir -p /data/uploads && chown 0:0 /data/uploads && chmod 555 /data/uploads"]
-    volumes:
-      - edgeagent_ftp:/data
-    networks:
-      - maveric
-```
-
-Rate limit note: the gateway's `/v1/agent/**` per-IP budget defaults to 120 requests/min, sized
-for one device. Fourteen devices behind one agent IP still onboard and push telemetry at that
-budget, but TR-069 command applies time out under the resulting 429s and get rolled back. Raise
-it with `AGENT_RATE_LIMIT_PER_MIN` (on gateway `main` since PR #25) by adding this to the same
-override, then recreate the gateway (`./scripts/compose.sh up --frontend`):
-
-```yaml
-  gateway:
-    environment:
-      AGENT_RATE_LIMIT_PER_MIN: "900"
-```
-
-## 6. Bring the fleet up and verify it is pushing telemetry and logs
-
-```bash
-docker compose --profile edgeagent up -d --build
-```
-
-Start order is `ftp-init` → `ftp` (healthy) → testsuite (the 14 mock devices, health on host
-port 9100) → agent (in-agent TR-069 ACS on 7547). Devices start 700 ms apart and the agent
-onboards them on its heartbeat, so allow about two minutes.
-
-Agent-side view, all 14 must have sent an Inform:
+Agent-side — all 14 must have sent an Inform (allow ~2 minutes; devices start 700 ms apart and the
+agent onboards them on its heartbeat):
 
 ```bash
 curl -s localhost:9100/health | jq '.fleet | {expected, informed}'    # -> 14 / 14
 ```
 
-Platform-side view, the rows the agent onboarded:
+Platform-side — the rows the agent onboarded:
 
 ```bash
 docker exec -i postgres sh -c 'psql -U "$POSTGRES_USER" -d maveric' <<'SQL'
@@ -176,18 +75,10 @@ select cwmp_id, health, op_state, last_inform_at from nanolink_devices order by 
 SQL
 ```
 
-Expect 14 rows with `health = healthy`, `op_state = t` and `last_inform_at` inside the last
-minute.
+Expect 14 rows with `health = healthy`, `op_state = t` and `last_inform_at` inside the last minute.
 
-What the fleet pushes once it is up, with no manual trigger:
-
-| Stream | Path | Lands in | Cadence |
-| --- | --- | --- | --- |
-| Inform + config snapshot | CWMP session to the agent ACS | `nanolink_devices`, `device_config_snapshots` | ~500 ms per device |
-| PM SampleSet values | agent telemetry over `/v1/agent/**` | `device_kpis` | continuous |
-| `Log_*.gz`, `ErrorLog_*.gz` | FTP upload → agent watch dir → log parser | `device_events` (modules `FILE_TRANS`, `TR69`, `SON`, ...) | 60 s per device |
-
-Confirm the log push after two minutes:
+Confirm the log push after two minutes — rows such as `FILE_TRANS / ftp_upload_ok` and
+`TR69 / autonomous_transfer_complete` mean the FTP loop and the log parser both work end to end:
 
 ```bash
 docker exec -i postgres sh -c 'psql -U "$POSTGRES_USER" -d maveric' <<'SQL'
@@ -197,48 +88,101 @@ group by 1, 2 order by 3 desc limit 8;
 SQL
 ```
 
-Rows such as `FILE_TRANS / ftp_upload_ok` and `TR69 / autonomous_transfer_complete` mean both the
-FTP loop and the log parser work end to end. With the `e2e` stack the same devices appear on
-`localhost:3000/devices`.
+With `--frontend` the same devices appear on `localhost:3000/devices`.
 
-## 7. Gotchas, reset and re-enrolment
+## 4. What the fleet pushes, with no manual trigger
 
-- **Re-enrolling under a new edge resurrects old devices.** The agent keeps its CWMP store in the
-  `cloudlynet_ai_edgeagent_buffer` volume and re-announces every device it remembers on the first
-  heartbeat after a new token. Before switching edges: `docker compose --profile edgeagent down`,
-  `docker volume rm cloudlynet_ai_edgeagent_buffer`, delete the old edge (step 3), then bring the
-  profile up again.
-- **Stopping the fleet keeps its rows.** `docker compose --profile edgeagent down` leaves
-  `nanolink_devices` in place with a stale `last_inform_at`; the same cwmp_ids re-attach to the
-  same rows on the next start, so no re-onboarding is needed.
+| Stream | Path | Lands in | Cadence |
+| --- | --- | --- | --- |
+| Inform + config snapshot | CWMP session to the agent ACS | `nanolink_devices`, `device_config_snapshots` | ~500 ms per device |
+| PM SampleSet values | agent telemetry over `/v1/agent/**` | `device_kpis` | continuous |
+| `Log_*.gz`, `ErrorLog_*.gz` | FTP upload → agent watch dir → log parser | `device_events` (`FILE_TRANS`, `TR69`, `SON`, …) | 60 s per device |
+
+The gateway's `/v1/agent/**` budget defaults to 120 req/min, sized for one device. `--femtofleet`
+raises it to 900 via `AGENT_RATE_LIMIT_PER_MIN`; without that, 14 devices behind one agent IP make
+TR-069 command applies time out and roll back as a false FAIL.
+
+## 5. Reset
+
+```bash
+./scripts/femtofleet.sh --reset
+```
+
+Removes the four fleet containers, drops the agent buffer volume, deletes the minted edge if there
+is one, and clears the token cache. It prints exactly what it will remove and asks first (`--yes`
+to skip the prompt).
+
+**Dropping the buffer volume is the part that matters.** The agent keeps its CWMP store there and
+re-announces every device it remembers on the first heartbeat after a new token, so a
+containers-only teardown brings the old devices straight back.
+
+## 6. Gotchas
+
+- **`docker compose down` is stack-wide — `--profile` does NOT scope it.** Earlier revisions of
+  this file told you to run `docker compose --profile edgeagent down` to "stop the fleet only".
+  That is wrong and it will stop your whole stack: measured with `--dry-run`, it removes 13
+  containers including postgres, redis, mongo, kafka, zookeeper, minio and pgadmin (adding
+  `--remove-orphans` changes nothing — the count is identical). To stop only the fleet, use
+  `./scripts/femtofleet.sh --reset`, or name the services:
+  `docker compose --profile edgeagent rm -sf cloudlynet-edgeagent cloudlynet-edgeagent-testsuite ftp ftp-init`.
+  `./scripts/compose.sh down` stops the whole stack deliberately; add `-v` to wipe volumes.
+- **Stopping the fleet keeps its rows.** The same cwmp_ids re-attach to the same rows on the next
+  start, with a stale `last_inform_at` in between. No re-onboarding needed.
 - **Fleet conf errors fail startup on purpose.** A missing or duplicate serial, or an unquoted
-  number, stops the testsuite container; `docker logs cloudlynet_ai-cloudlynet-edgeagent-testsuite-1`
-  names the offending entry.
+  number, stops the testsuite container;
+  `docker logs maveric_platform_dev-cloudlynet-edgeagent-testsuite-1` names the offending entry.
 - **Everything returns after a Docker restart** (`restart: unless-stopped`), fleet included. After
   an unclean shutdown check `docker ps` for `redis` in `Restarting`: `docker logs redis` showing
   `Bad file format reading the append only file` means the AOF is corrupt, which also keeps
   `copilot-backend` and `copilot-mcp-server` from starting. Fix: stop redis, run
-  `redis-check-aof --fix appendonly.aof.manifest` inside `/data/appendonlydir` of the
-  `cloudlynet_ai_redis_data` volume (same image the stack runs; back the `*.incr.aof` file up
-  first), start redis, then `./scripts/compose.sh up` again.
+  `redis-check-aof --fix appendonly.aof.manifest` inside `/data/appendonlydir` of the redis data
+  volume (same image the stack runs; back the `*.incr.aof` file up first), start redis, then
+  `./scripts/compose.sh up` again.
 - **The FTP watch dir is pruned by the mock devices.** Each mock femtocell deletes its own uploads
   older than `NANOLINK_FTP_RETENTION` (default `6h`; `0` keeps everything) over FTP (`DELE`), so the
-  `edgeagent_ftp` volume holds about six hours of logs instead of growing without bound (it reached
-  ~354,000 files / 1.4 GB in ~78 days before this). Files parked in a subdirectory are ignored by
-  both the agent and the pruning.
+  volume holds about six hours of logs instead of growing without bound (it reached ~354,000 files
+  / 1.4 GB in ~78 days before this). Files parked in a subdirectory are ignored by both the agent
+  and the pruning.
 - **An agent restart no longer replays the watch dir.** The agent records what it has ingested in
-  `buffer.sqlite` (`ftp_ingested`) and resumes from it; `buffer_max_bytes` now caps outbox payload
-  rather than the file size, so a large CWMP store or ledger can no longer wedge the outbox. If you
-  delete `buffer.sqlite`, the next start re-ingests whatever is in the watch dir once (the cloud
-  dedups the repeated events).
+  `buffer.sqlite` (`ftp_ingested`) and resumes from it; `buffer_max_bytes` caps outbox payload
+  rather than file size, so a large CWMP store or ledger can no longer wedge the outbox. Deleting
+  `buffer.sqlite` makes the next start re-ingest the watch dir once (the cloud dedups).
 - **The first start after upgrading replays the watch dir once.** An agent older than the ingest
   ledger leaves no `ftp_ingested` rows, so the first start of the new binary re-parses every
-  `Log_*`/`ErrorLog_*` file in the watch dir, exactly as if `buffer.sqlite` had been deleted. On a
-  watch dir that was never pruned (the ~354,000-file case) that replay can overflow
-  `buffer_max_bytes`, and the cap then evicts the oldest outbox rows, unsent telemetry included.
-  Before upgrading an agent with a large unpruned watch dir, let its outbox drain, then prune the
-  old uploads or move them into a subdirectory of the watch dir (the agent skips directories). The
-  local demo was already handled this way on 2026-10-28.
-- **Teardown.** `docker compose --profile edgeagent down` stops the fleet only;
-  `./scripts/compose.sh down` stops the whole stack. Volumes persist either way; add `-v`
-  to wipe them.
+  `Log_*`/`ErrorLog_*` file in the watch dir. On a watch dir that was never pruned (the
+  ~354,000-file case) that replay can overflow `buffer_max_bytes`, and the cap then evicts the
+  oldest outbox rows, unsent telemetry included. Before upgrading an agent with a large unpruned
+  watch dir, let its outbox drain, then prune the old uploads or move them into a subdirectory of
+  the watch dir (the agent skips directories).
+
+## 7. Volume names
+
+Compose prefixes volumes with the **project name**, which is the directory the stack runs from —
+`maveric_platform_dev`, not `cloudlynet_ai`. So the agent buffer is
+`maveric_platform_dev_edgeagent_buffer`. Earlier revisions of this file named
+`cloudlynet_ai_edgeagent_buffer`, which does not exist: `docker volume rm` on it fails, the reset
+silently does nothing, and the remembered devices come back. Derive it rather than typing it:
+
+```bash
+docker volume ls --filter name=edgeagent_buffer
+```
+
+## 8. Manual path (fallback)
+
+Only needed if you are debugging the flag itself. Mint an edge and start the profile by hand:
+
+```bash
+TID=00000000-0000-0000-3029-000000000001
+curl -s -X POST localhost:8080/v1/tenants/$TID/custom/nybsys/edge-devices \
+  -H 'Content-Type: application/json' -d '{"name":"femto-fleet-local"}' | jq .data
+# -> { "edge_id": "...", "name": "...", "enrollment_token": "eyJ..." }   token shown ONCE
+```
+
+Then export `CLOUDLYNET_ENROLLMENT_TOKEN`, `NANOLINK_CONF_FILE`, `EDGEAGENT_TESTSUITE_MODE=acsftp`,
+`CLOUDLYNET_EDGE_BASE_URL=http://maveric_gateway:8080`, an empty `EDGEAGENT_CWMP_CR_URL` and
+`AGENT_RATE_LIMIT_PER_MIN=900`, and run
+`docker compose --profile apps --profile edgeagent up -d`.
+
+Calling the create endpoint again makes a **second** edge; remove extras with
+`DELETE localhost:8080/v1/tenants/$TID/custom/nybsys/edge-devices/{edge_id}` (cascades that edge's
+devices, KPIs and events). Re-read the pinning warning in §2 before minting anything.
