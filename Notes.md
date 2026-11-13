@@ -42,11 +42,20 @@ The conf is committed at `scripts/femtofleet.conf`: 14 devices, synthetic serial
 are placeholders by convention: **never put real device serials or real cell ids in a tracked
 file.**
 
-### Enrolment: nothing to mint
+### Enrolment: automatic, minted only when needed
 
-The agent enrols with the token baked into `docker-compose.yaml` as the default for
-`CLOUDLYNET_ENROLLMENT_TOKEN`, which maps to the seeded local edge. You do not need to create an
-edge or copy a token.
+The agent's default token (the `CLOUDLYNET_ENROLLMENT_TOKEN` default in `docker-compose.yaml`, or
+your root `.env` override) names an edge. For the yaml default that is `11111111-…`, and **nothing
+seeds that edge's row**: no schema, migration or script creates it, so it exists only where someone
+inserted it by hand. Without the row the agent loops on `401 INVALID_EDGE_KEY`.
+
+`femtofleet.sh` therefore asks the platform first. If the token's edge exists, it is used as is. If
+not (a fresh database), the script mints a dedicated edge `femto-fleet-local` and caches its token
+in `.femtofleet/token`. You do not need to create an edge or copy a token either way.
+
+The script reports success only when all 14 serials have a `nanolink_devices` row on the edge it
+enrolled as. Otherwise it exits 1 and says whether the agent was refused or the devices are bound
+to another edge.
 
 > **Do not mint a new edge to "start clean".** A device is pinned to the **first** edge that
 > reported it: smo-sim's upsert is `ON CONFLICT (tenant_id, cwmp_id) DO UPDATE SET ...` with
@@ -59,6 +68,10 @@ edge or copy a token.
 > before walking into the above.
 
 ## 3. Verify
+
+`femtofleet.sh` already checks both halves below; these are the manual equivalents. The agent-side
+count alone proves nothing about the platform: it reads 14/14 even while the platform refuses the
+agent.
 
 Agent-side — all 14 must have sent an Inform (allow ~2 minutes; devices start 700 ms apart and the
 agent onboards them on its heartbeat):
